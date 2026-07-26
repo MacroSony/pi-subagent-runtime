@@ -77,7 +77,12 @@ const prepared = await runtime.prepare({
   intent: {
     model: { provider: "example", id: "review-model" },
     requestedTools: ["read", "grep", "find", "ls"],
-    access: { level: "read-only", network: "allow" },
+    access: {
+      level: "read-only",
+      executionBoundary: "shared-user",
+      workspaces: [{ handle: "workspace", mode: "read-only" }],
+      network: "allow",
+    },
     limits: { timeoutMs: { value: 60_000, enforcement: "best-effort" } },
   },
   compile: async (promptRuntime) => ({
