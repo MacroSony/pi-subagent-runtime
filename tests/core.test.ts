@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { readFile, readdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -29,7 +29,7 @@ import {
 } from "../src/core/index.ts";
 
 const TEST_DIRECTORY = dirname(fileURLToPath(import.meta.url));
-const SOURCE_DIRECTORY = join(TEST_DIRECTORY, "..", "src", "core");
+const SOURCE_DIRECTORY = join(TEST_DIRECTORY, "..", "src");
 
 const ACCESS_CAPABILITIES: AccessCapabilities = {
   readOnlyMountIsolation: true,
@@ -518,13 +518,12 @@ test("public validators report malformed values instead of throwing", () => {
   );
 });
 
-test("portable core has no Pi SDK or Forge imports", async () => {
-  for (const name of [
-    "canonical.ts",
-    "contracts.ts",
-    "index.ts",
-    "validation.ts",
-  ]) {
+test("portable core, runtime, and testing layers have no Pi SDK or Forge imports", async () => {
+  const names = await readdir(SOURCE_DIRECTORY, {
+    recursive: true,
+  });
+  for (const name of names) {
+    if (!name.endsWith(".ts")) continue;
     const source = await readFile(join(SOURCE_DIRECTORY, name), "utf8");
     assert.doesNotMatch(source, /@earendil-works\/pi-/);
     assert.doesNotMatch(source, /pi-forge|agent-profile|prompt-stack/);
