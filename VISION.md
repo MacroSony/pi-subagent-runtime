@@ -460,6 +460,14 @@ inspects the sealed plan, authorizes it, and executes the prepared handle.
 
 ## First implementation sequence
 
+> **Progress (2026-07-21):** steps 0-6 are implemented and verified — 53
+> tests green (core, runtime lifecycle, conformance, both process backends,
+> real-CLI fidelity and independent-host e2e). Pi Forge consumes the public
+> runtime as its first host (`@zihanw/pi-forge` migration commit), and
+> `examples/independent-host/` proves adoption from the package surface
+> alone. Remaining before any stability claim: a genuine second consumer or
+> backend author, per the completion criteria below.
+
 ### 0. Preserve the evidence
 
 - Record the current Forge test baseline.

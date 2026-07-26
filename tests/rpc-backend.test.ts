@@ -2,9 +2,8 @@ import assert from "node:assert/strict";
 import { readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import test from "node:test";
-import type { Context, Model, SimpleStreamOptions } from "@earendil-works/pi-ai";
-import { createFauxCore, InMemoryCredentialStore } from "@earendil-works/pi-ai";
-import { ModelRegistry, ModelRuntime } from "@earendil-works/pi-coding-agent";
+import type { Context } from "@earendil-works/pi-ai";
+import { createFixturePiRuntime } from "./helpers/fixture-pi-runtime.ts";
 import type {
   ExecutionIntent,
   PreparedConversation,
@@ -25,10 +24,10 @@ const API = "pi-subagent-runtime-rpc-api";
 test("RPC backend sends the marker over JSONL, streams events, and settles with usage and a sanitized report", async () => {
   const tempDirectoriesBefore = subprocessTempDirectories();
   const providerContexts: Context[] = [];
-  const faux = createFauxCore({
-    api: API,
+  const { faux, modelRegistry } = await createFixturePiRuntime({
     provider: PROVIDER,
-    models: [{ id: MODEL_ID, name: "Fixture", reasoning: true }],
+    api: API,
+    modelId: MODEL_ID,
   });
   faux.setResponses([
     (context) => {
@@ -36,7 +35,7 @@ test("RPC backend sends the marker over JSONL, streams events, and settles with 
       throw new Error("dry preparation must not reach this provider");
     },
   ]);
-  const { modelRegistry } = await fixtureModelRuntime(faux);
+
   const invocationArgs: string[][] = [];
   const backend = new PiRpcBackend({
     modelRegistry,
@@ -116,17 +115,17 @@ test("RPC backend sends the marker over JSONL, streams events, and settles with 
 });
 
 test("RPC cancellation uses the abort command and settles cancelled after the child closes", async () => {
-  const faux = createFauxCore({
-    api: API,
+  const { faux, modelRegistry } = await createFixturePiRuntime({
     provider: PROVIDER,
-    models: [{ id: MODEL_ID, name: "Fixture", reasoning: true }],
+    api: API,
+    modelId: MODEL_ID,
   });
   faux.setResponses([
     () => {
       throw new Error("dry preparation must not reach this provider");
     },
   ]);
-  const { modelRegistry } = await fixtureModelRuntime(faux);
+
   const backend = new PiRpcBackend({
     modelRegistry,
     cwd: process.cwd(),
@@ -171,17 +170,17 @@ test("RPC cancellation uses the abort command and settles cancelled after the ch
 });
 
 test("RPC cancellation escalates to process termination when abort does not settle", async () => {
-  const faux = createFauxCore({
-    api: API,
+  const { faux, modelRegistry } = await createFixturePiRuntime({
     provider: PROVIDER,
-    models: [{ id: MODEL_ID, name: "Fixture", reasoning: true }],
+    api: API,
+    modelId: MODEL_ID,
   });
   faux.setResponses([
     () => {
       throw new Error("dry preparation must not reach this provider");
     },
   ]);
-  const { modelRegistry } = await fixtureModelRuntime(faux);
+
   const backend = new PiRpcBackend({
     modelRegistry,
     cwd: process.cwd(),
@@ -233,17 +232,17 @@ test("RPC cancellation escalates to process termination when abort does not sett
 });
 
 test("RPC backend disposal cancels active children", async () => {
-  const faux = createFauxCore({
-    api: API,
+  const { faux, modelRegistry } = await createFixturePiRuntime({
     provider: PROVIDER,
-    models: [{ id: MODEL_ID, name: "Fixture", reasoning: true }],
+    api: API,
+    modelId: MODEL_ID,
   });
   faux.setResponses([
     () => {
       throw new Error("dry preparation must not reach this provider");
     },
   ]);
-  const { modelRegistry } = await fixtureModelRuntime(faux);
+
   const backend = new PiRpcBackend({
     modelRegistry,
     cwd: process.cwd(),
@@ -286,17 +285,17 @@ test("RPC backend disposal cancels active children", async () => {
 });
 
 test("RPC backend fails closed when the marker prompt is rejected before transport", async () => {
-  const faux = createFauxCore({
-    api: API,
+  const { faux, modelRegistry } = await createFixturePiRuntime({
     provider: PROVIDER,
-    models: [{ id: MODEL_ID, name: "Fixture", reasoning: true }],
+    api: API,
+    modelId: MODEL_ID,
   });
   faux.setResponses([
     () => {
       throw new Error("dry preparation must not reach this provider");
     },
   ]);
-  const { modelRegistry } = await fixtureModelRuntime(faux);
+
   const backend = new PiRpcBackend({
     modelRegistry,
     cwd: process.cwd(),
@@ -333,17 +332,17 @@ test("RPC backend fails closed when the marker prompt is rejected before transpo
 });
 
 test("RPC backend fails closed on malformed JSONL from the child", async () => {
-  const faux = createFauxCore({
-    api: API,
+  const { faux, modelRegistry } = await createFixturePiRuntime({
     provider: PROVIDER,
-    models: [{ id: MODEL_ID, name: "Fixture", reasoning: true }],
+    api: API,
+    modelId: MODEL_ID,
   });
   faux.setResponses([
     () => {
       throw new Error("dry preparation must not reach this provider");
     },
   ]);
-  const { modelRegistry } = await fixtureModelRuntime(faux);
+
   const backend = new PiRpcBackend({
     modelRegistry,
     cwd: process.cwd(),
@@ -380,17 +379,17 @@ test("RPC backend fails closed on malformed JSONL from the child", async () => {
 
 test("subprocess and RPC backends seal the same conversation with different execution fingerprints", async () => {
   const tempDirectoriesBefore = subprocessTempDirectories();
-  const faux = createFauxCore({
-    api: API,
+  const { faux, modelRegistry } = await createFixturePiRuntime({
     provider: PROVIDER,
-    models: [{ id: MODEL_ID, name: "Fixture", reasoning: true }],
+    api: API,
+    modelId: MODEL_ID,
   });
   faux.setResponses([
     () => {
       throw new Error("dry preparation must not reach this provider");
     },
   ]);
-  const { modelRegistry } = await fixtureModelRuntime(faux);
+
   const subprocess = new PiSubprocessBackend({
     modelRegistry,
     cwd: process.cwd(),
@@ -450,17 +449,17 @@ test("subprocess and RPC backends seal the same conversation with different exec
 });
 
 test("RPC backend passes the reusable conformance suite", async () => {
-  const faux = createFauxCore({
-    api: API,
+  const { faux, modelRegistry } = await createFixturePiRuntime({
     provider: PROVIDER,
-    models: [{ id: MODEL_ID, name: "Fixture", reasoning: true }],
+    api: API,
+    modelId: MODEL_ID,
   });
   faux.setResponses([
     () => {
       throw new Error("dry preparation must not reach this provider");
     },
   ]);
-  const { modelRegistry } = await fixtureModelRuntime(faux);
+
   const backend = new PiRpcBackend({
     modelRegistry,
     cwd: process.cwd(),
@@ -645,37 +644,6 @@ function fixtureConversation(): PreparedConversation {
   };
 }
 
-async function fixtureModelRuntime(
-  faux: ReturnType<typeof createFauxCore>,
-): Promise<{ modelRegistry: ModelRegistry; modelRuntime: ModelRuntime }> {
-  const modelRuntime = await ModelRuntime.create({
-    credentials: new InMemoryCredentialStore(),
-    modelsPath: null,
-    allowModelNetwork: false,
-  });
-  modelRuntime.registerProvider(PROVIDER, {
-    api: API,
-    baseUrl: "https://fixture.invalid",
-    apiKey: "fixture-key",
-    streamSimple: (
-      model: Model<any>,
-      context: Context,
-      options?: SimpleStreamOptions,
-    ) => faux.streamSimple(model, context, options),
-    models: [
-      {
-        id: MODEL_ID,
-        name: "Fixture model",
-        reasoning: true,
-        input: ["text"],
-        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-        contextWindow: 32_000,
-        maxTokens: 4_000,
-      },
-    ],
-  });
-  return { modelRuntime, modelRegistry: new ModelRegistry(modelRuntime) };
-}
 
 function assertContainsFlag(args: string[], flag: string, value: string): void {
   const index = args.indexOf(flag);

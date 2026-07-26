@@ -2,9 +2,8 @@ import assert from "node:assert/strict";
 import { readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import test from "node:test";
-import type { Context, Model, SimpleStreamOptions } from "@earendil-works/pi-ai";
-import { createFauxCore, InMemoryCredentialStore } from "@earendil-works/pi-ai";
-import { ModelRegistry, ModelRuntime } from "@earendil-works/pi-coding-agent";
+import type { Context } from "@earendil-works/pi-ai";
+import { createFixturePiRuntime } from "./helpers/fixture-pi-runtime.ts";
 import type {
   ExecutionIntent,
   PreparedConversation,
@@ -30,10 +29,10 @@ const API = "pi-subagent-runtime-subprocess-api";
 test("subprocess backend prepares through the parent model runtime, executes a fresh child, and retains a sanitized report", async () => {
   const tempDirectoriesBefore = subprocessTempDirectories();
   const providerContexts: Context[] = [];
-  const faux = createFauxCore({
-    api: API,
+  const { faux, modelRegistry } = await createFixturePiRuntime({
     provider: PROVIDER,
-    models: [{ id: MODEL_ID, name: "Fixture", reasoning: true }],
+    api: API,
+    modelId: MODEL_ID,
   });
   faux.setResponses([
     (context) => {
@@ -41,7 +40,7 @@ test("subprocess backend prepares through the parent model runtime, executes a f
       throw new Error("dry preparation must not reach this provider");
     },
   ]);
-  const { modelRegistry } = await fixtureModelRuntime(faux);
+
   const invocationArgs: string[][] = [];
   const events = fixtureEvents();
   const backend = new PiSubprocessBackend({
@@ -155,17 +154,17 @@ test("subprocess backend prepares through the parent model runtime, executes a f
 
 test("subprocess cancellation waits for the child to close and terminalizes its report", async () => {
   const tempDirectoriesBefore = subprocessTempDirectories();
-  const faux = createFauxCore({
-    api: API,
+  const { faux, modelRegistry } = await createFixturePiRuntime({
     provider: PROVIDER,
-    models: [{ id: MODEL_ID, name: "Fixture", reasoning: true }],
+    api: API,
+    modelId: MODEL_ID,
   });
   faux.setResponses([
     () => {
       throw new Error("dry preparation must not reach this provider");
     },
   ]);
-  const { modelRegistry } = await fixtureModelRuntime(faux);
+
   const startedEvent = {
     type: "message_end",
     message: {
@@ -241,17 +240,17 @@ test("subprocess cancellation waits for the child to close and terminalizes its 
 
 test("subprocess backend disposal waits for active children instead of orphaning them", async () => {
   const tempDirectoriesBefore = subprocessTempDirectories();
-  const faux = createFauxCore({
-    api: API,
+  const { faux, modelRegistry } = await createFixturePiRuntime({
     provider: PROVIDER,
-    models: [{ id: MODEL_ID, name: "Fixture", reasoning: true }],
+    api: API,
+    modelId: MODEL_ID,
   });
   faux.setResponses([
     () => {
       throw new Error("dry preparation must not reach this provider");
     },
   ]);
-  const { modelRegistry } = await fixtureModelRuntime(faux);
+
   const startedEvent = fixtureEvents().at(-1);
   const script = [
     'const { writeSync } = await import("node:fs");',
@@ -444,12 +443,12 @@ test("retained subprocess reports bound strings and keep a rolling transcript ta
 });
 
 test("subprocess backend rejects intents a shared-user child cannot enforce", async () => {
-  const faux = createFauxCore({
-    api: API,
+  const { faux, modelRegistry, modelRuntime } = await createFixturePiRuntime({
     provider: PROVIDER,
-    models: [{ id: MODEL_ID, name: "Fixture", reasoning: true }],
+    api: API,
+    modelId: MODEL_ID,
   });
-  const { modelRegistry, modelRuntime } = await fixtureModelRuntime(faux);
+
   const backend = new PiSubprocessBackend({
     modelRegistry,
     modelRuntime,
@@ -546,17 +545,17 @@ test("subprocess backend rejects intents a shared-user child cannot enforce", as
 });
 
 test("subprocess backend passes the reusable conformance suite", async () => {
-  const faux = createFauxCore({
-    api: API,
+  const { faux, modelRegistry } = await createFixturePiRuntime({
     provider: PROVIDER,
-    models: [{ id: MODEL_ID, name: "Fixture", reasoning: true }],
+    api: API,
+    modelId: MODEL_ID,
   });
   faux.setResponses([
     () => {
       throw new Error("dry preparation must not reach this provider");
     },
   ]);
-  const { modelRegistry } = await fixtureModelRuntime(faux);
+
   const events = fixtureEvents();
   const backend = new PiSubprocessBackend({
     modelRegistry,
@@ -614,37 +613,6 @@ function fixtureConversation(): PreparedConversation {
   };
 }
 
-async function fixtureModelRuntime(
-  faux: ReturnType<typeof createFauxCore>,
-): Promise<{ modelRegistry: ModelRegistry; modelRuntime: ModelRuntime }> {
-  const modelRuntime = await ModelRuntime.create({
-    credentials: new InMemoryCredentialStore(),
-    modelsPath: null,
-    allowModelNetwork: false,
-  });
-  modelRuntime.registerProvider(PROVIDER, {
-    api: API,
-    baseUrl: "https://fixture.invalid",
-    apiKey: "fixture-key",
-    streamSimple: (
-      model: Model<any>,
-      context: Context,
-      options?: SimpleStreamOptions,
-    ) => faux.streamSimple(model, context, options),
-    models: [
-      {
-        id: MODEL_ID,
-        name: "Fixture model",
-        reasoning: true,
-        input: ["text"],
-        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-        contextWindow: 32_000,
-        maxTokens: 4_000,
-      },
-    ],
-  });
-  return { modelRuntime, modelRegistry: new ModelRegistry(modelRuntime) };
-}
 
 function fixtureEvents(): unknown[] {
   return [

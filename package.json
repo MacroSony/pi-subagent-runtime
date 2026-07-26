@@ -48,7 +48,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
-    "test": "node --test --test-concurrency=1 tests/*.test.ts",
+    "test": "npm run build && node --test --test-concurrency=1 \"tests/*.test.ts\"",
     "verify": "npm test && npm run typecheck && npm run build"
   },
   "devDependencies": {

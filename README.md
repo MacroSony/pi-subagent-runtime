@@ -136,6 +136,17 @@ Both initial process backends report a shared-user boundary unless a separate
 sandbox implementation launches the entire process under stronger
 enforcement.
 
+## Host independence
+
+The runtime works from its published package surface alone.
+[`examples/independent-host/`](./examples/independent-host/) contains a
+complete minimal host — its own profile format, prompt compiler, approval
+gate, and cancellation — driving both process backends with plan, receipt,
+and report parity. The example is exercised directly by
+`tests/independent-host.test.ts` (scripted children) and
+`tests/independent-host.e2e.test.ts` (real `pi` children when a CLI is
+available), so it cannot drift from the shipped API.
+
 ## Architecture and implementation plan
 
 See [VISION.md](./VISION.md) for ownership boundaries, contract direction,

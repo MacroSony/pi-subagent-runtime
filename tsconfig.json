@@ -9,9 +9,29 @@
     "noImplicitOverride": true,
     "useUnknownInCatchVariables": true,
     "skipLibCheck": true,
-    "types": ["node"],
+    "types": [
+      "node"
+    ],
     "noEmit": true,
-    "allowImportingTsExtensions": true
+    "allowImportingTsExtensions": true,
+    "paths": {
+      "@zihanw/pi-subagent-runtime": [
+        "./src/index.ts"
+      ],
+      "@zihanw/pi-subagent-runtime/testing": [
+        "./src/testing/index.ts"
+      ],
+      "@zihanw/pi-subagent-runtime/backends/subprocess": [
+        "./src/backends/subprocess/index.ts"
+      ],
+      "@zihanw/pi-subagent-runtime/backends/rpc": [
+        "./src/backends/rpc/index.ts"
+      ]
+    }
   },
-  "include": ["src/**/*.ts", "tests/**/*.ts"]
+  "include": [
+    "src/**/*.ts",
+    "tests/**/*.ts",
+    "examples/**/*.ts"
+  ]
 }
