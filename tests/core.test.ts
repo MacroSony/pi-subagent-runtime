@@ -524,6 +524,9 @@ test("portable core, runtime, and testing layers have no Pi SDK or Forge imports
   });
   for (const name of names) {
     if (!name.endsWith(".ts")) continue;
+    // Pi version coupling is confined to backend entry points; the portable
+    // core, runtime, and testing layers must stay Pi-free.
+    if (name.startsWith("backends/")) continue;
     const source = await readFile(join(SOURCE_DIRECTORY, name), "utf8");
     assert.doesNotMatch(source, /@earendil-works\/pi-/);
     assert.doesNotMatch(source, /pi-forge|agent-profile|prompt-stack/);

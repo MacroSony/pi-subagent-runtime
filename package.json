@@ -27,6 +27,11 @@
       "types": "./dist/testing/index.d.ts",
       "import": "./dist/testing/index.js",
       "default": "./dist/testing/index.js"
+    },
+    "./backends/subprocess": {
+      "types": "./dist/backends/subprocess/index.d.ts",
+      "import": "./dist/backends/subprocess/index.js",
+      "default": "./dist/backends/subprocess/index.js"
     }
   },
   "files": [
@@ -42,7 +47,26 @@
     "verify": "npm test && npm run typecheck && npm run build"
   },
   "devDependencies": {
+    "@earendil-works/pi-agent-core": "0.82.1",
+    "@earendil-works/pi-ai": "0.82.1",
+    "@earendil-works/pi-coding-agent": "0.82.1",
     "@types/node": "22.20.1",
     "typescript": "6.0.3"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-agent-core": "0.82.1",
+    "@earendil-works/pi-ai": "0.82.1",
+    "@earendil-works/pi-coding-agent": "0.82.1"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-agent-core": {
+      "optional": true
+    },
+    "@earendil-works/pi-ai": {
+      "optional": true
+    },
+    "@earendil-works/pi-coding-agent": {
+      "optional": true
+    }
   }
 }

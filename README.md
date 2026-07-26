@@ -112,8 +112,12 @@ so backend trust remains explicit.
 
 ## First backends
 
-The first backend will adapt Pi Forge's existing hybrid implementation:
-Pi-SDK-backed preparation followed by execution in a fresh Pi subprocess.
+The first backend, available at
+`@zihanw/pi-subagent-runtime/backends/subprocess`, adapts Pi Forge's hybrid
+implementation: Pi-SDK-backed preparation behind a provider gate, followed by
+execution in a fresh Pi subprocess through the trusted prepared-message
+bridge. It preserves bounded sanitized reporting, cancellation draining with
+TERM-to-KILL escalation, and honest `shared-user` enforcement receipts.
 
 A fresh-process Pi RPC backend follows as the second adapter. It will use Pi's
 documented JSONL protocol for events, abort, state, and usage, while reusing the
