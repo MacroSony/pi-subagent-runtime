@@ -1,104 +1,137 @@
 # Pi Subagent Runtime
 
-> An API-first, policy-aware runtime for spawning prepared Pi agents.
+> A pure execution kernel for caller-prepared Pi agents.
 
-**Status:** Pre-alpha. The public contract is being designed and the package is
-not yet published.
+**Status:** Pre-alpha. The contract and first reference backends are being
+extracted from Pi Forge. The package is not yet published.
 
-Pi Subagent Runtime is a small execution layer for
-[Pi](https://github.com/earendil-works/pi) subagents. It provides useful
-defaults for direct use while remaining open to profile managers, review
-tools, workflow engines, sandbox providers, and other Pi extensions.
+Pi Subagent Runtime lets another extension or application execute an exact,
+caller-compiled Pi conversation through an explicitly selected backend.
 
-## Why?
+It does not discover agents, construct task prompts, choose a backend, register
+a model-callable tool, or own workflows and UI.
 
-Existing Pi subagent packages often combine execution with named agents,
-prompt construction, workflow orchestration, memory, scheduling, or UI. Those
-features are useful when one package owns the complete subagent experience,
-but they make the execution layer harder for another extension to reuse.
+## The boundary
 
-Pi Subagent Runtime targets a lower-level boundary:
+```text
+Pi Forge / review tool / workflow engine / custom host
+        owns prompts, policy, approval, orchestration, UI
+                              |
+                              v
+                 Pi Subagent Runtime
+        owns preflight, preparation mediation, sealing,
+               lifecycle, cancellation, receipts
+                              |
+                              v
+             subprocess / RPC / sandbox / remote backend
+```
 
-> Run a caller-prepared Pi agent without taking ownership of its prompt,
-> profile, policy, workflow, or UI.
+The project targets a narrower gap than a general subagent package:
 
-## What it provides
+> Execute a caller-compiled, ordered Pi conversation without reinterpreting it,
+> silently weakening its requirements, or overstating the enforced boundary.
 
-- exact prepared system prompts and ordered messages;
-- foreground and session-scoped background runs;
-- bounded parallel execution and queuing;
-- cancellation, timeouts, limits, and bounded output;
-- backend capability negotiation before execution;
-- enforcement receipts describing the boundary actually provided;
-- pluggable in-process, subprocess, sandbox, container, or remote backends;
-- a typed API for other Pi extensions;
-- a thin optional Pi extension for direct users.
+## What the runtime provides
 
-The runtime uses conservative defaults, but it does not describe tool
-restriction as an operating-system sandbox. Unsupported required guarantees
-are rejected rather than silently weakened.
+- portable execution-intent and prepared-message contracts;
+- explicit backend registration and selection;
+- capability negotiation before provider transport;
+- exact or backend-assisted host compilation;
+- runtime-generated conversation and execution fingerprints with sealed-plan
+  binding;
+- inspectable prepared plans for host-owned approval;
+- evented run handles, cancellation, cleanup, and terminal results;
+- enforcement receipts that distinguish tool policy from OS isolation;
+- reusable backend conformance tests.
 
-## What it does not own
+An enforcement receipt is a backend attestation. The runtime validates
+consistency, but callers remain responsible for trusting backend
+implementations.
 
-- bundled agent personas or prompt presets;
-- prompt-stack or profile management;
-- workflow chains, DAGs, scheduling, or persistent memory;
-- model routing and fallback policy;
-- worktree orchestration or inter-agent messaging;
-- product-specific session viewers and UI.
+## What it does not provide
 
-These belong to callers or optional companion packages.
+- a `subagent` tool or Pi command;
+- agent personas, Markdown discovery, or prompt defaults;
+- task-to-prompt construction or context inheritance;
+- model routing or backend fallback;
+- batch queues, background jobs, workflows, retries, or scheduling;
+- worktree, sandbox, container, or remote policy;
+- approval UI, viewers, persistence, or product-specific artifacts.
+
+Hosts and separately versioned backends may provide those features.
 
 ## API direction
 
-All runs return asynchronous handles. Foreground execution awaits the result;
-background execution retains the handle and continues. Parallel fan-out uses
-the same bounded queue rather than a separate workflow engine.
+Preparation is two-phase because some exact Pi prompt inputs are available only
+inside the backend's prompt lifecycle:
 
 ```ts
-import {
-  createSubagentRuntime,
-  PiSubprocessBackend,
-} from "@zihanw/pi-subagent-runtime";
+import { createExecutionRuntime } from "@zihanw/pi-subagent-runtime";
+import { PiRpcBackend } from "@zihanw/pi-subagent-runtime/backends/rpc";
 
-const runtime = createSubagentRuntime({
-  maxConcurrent: 4,
-  backends: [new PiSubprocessBackend()],
+const runtime = createExecutionRuntime();
+runtime.registerBackend(new PiRpcBackend());
+
+const prepared = await runtime.prepare({
+  backendId: "pi-rpc",
+  intent: {
+    model: { provider: "example", id: "review-model" },
+    requestedTools: ["read", "grep", "find", "ls"],
+    access: { level: "read-only", network: "allow" },
+    limits: { timeoutMs: { value: 60_000, enforcement: "best-effort" } },
+  },
+  compile: async (promptRuntime) => ({
+    systemPrompt: compileOwnedSystemPrompt(promptRuntime),
+    messages: compileOwnedMessages(),
+  }),
 });
 
-const handle = runtime.spawn({
-  kind: "prepared",
-  systemPrompt: "You are reviewing a TypeScript library.",
-  messages: [
-    {
-      role: "user",
-      content: [{ type: "text", text: "Review the cancellation logic." }],
-    },
-  ],
-  model: { provider: "anthropic", id: "claude-sonnet-4-5" },
-  tools: ["read", "grep", "find", "ls"],
-  access: { level: "read-only", network: "allow" },
-  limits: { timeoutMs: 60_000 },
-});
-
-const result = await handle.result;
-console.log(result.output);
-console.log(result.enforcement);
+// The host may inspect prepared.snapshot() and obtain approval here.
+const run = runtime.execute(prepared);
+const result = await run.result;
 ```
 
-The API is illustrative and may change during the pre-alpha.
+The API is illustrative and will change during extraction. The important
+invariants are:
 
-## Architecture and roadmap
+- the host owns compilation;
+- the backend is selected explicitly;
+- the runtime computes and binds the execution fingerprint;
+- faithful materialization of the compiled conversation is a required backend
+  invariant tested by the conformance suite;
+- unsupported guarantees are rejected before provider transport.
 
-See [VISION.md](./VISION.md) for the design principles, safety model, proposed
-contracts, extension points, initial scope, explicit non-goals, and staged
-roadmap.
+The runtime can detect mutation of its sealed plan and inconsistent receipts.
+It cannot prove that a malicious backend sent the same content to a provider,
+so backend trust remains explicit.
+
+## First backends
+
+The first backend will adapt Pi Forge's existing hybrid implementation:
+Pi-SDK-backed preparation followed by execution in a fresh Pi subprocess.
+
+A fresh-process Pi RPC backend follows as the second adapter. It will use Pi's
+documented JSONL protocol for events, abort, state, and usage, while reusing the
+same SDK-backed preparation gate and trusted prepared-message bridge to install
+the sealed ordered conversation. RPC process reuse, resume, fork, steering, and
+durable sessions are outside the initial scope.
+
+Both initial process backends report a shared-user boundary unless a separate
+sandbox implementation launches the entire process under stronger
+enforcement.
+
+## Architecture and implementation plan
+
+See [VISION.md](./VISION.md) for ownership boundaries, contract direction,
+backend semantics, safety terminology, the first implementation sequence, and
+v0.1 completion criteria.
 
 ## Relationship to Pi Forge
 
-The runtime is being incubated from the experimental subagent adapter in
-[`@zihanw/pi-forge`](https://github.com/MacroSony/pi-forge). Pi Forge will own
-profile resolution, prompt-stack compilation, and policy; it will hand the
-runtime a sealed prepared plan and verify the returned enforcement receipt.
+The runtime is being extracted from the experimental subagent adapter in
+[`@zihanw/pi-forge`](https://github.com/MacroSony/pi-forge).
 
-Pi Forge is the first consumer, not a required dependency.
+Pi Forge remains responsible for profiles, prompt stacks, trusted compiler
+extensions, project trust, approval, and UI. It compiles through the runtime,
+inspects the sealed plan, and executes it through an explicitly selected
+backend.

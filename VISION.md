@@ -1,142 +1,225 @@
-# Pi Subagent Runtime: Vision and Plan
+# Pi Subagent Runtime: Vision and Implementation Plan
 
-Pi Subagent Runtime is an execution kernel for Pi subagents. It should be
-useful directly, but its primary architectural promise is that another
-extension can run a caller-prepared agent without surrendering ownership of
-prompts, profiles, tools, policy, workflow, or UI.
+## Status and decision
 
-This document defines that boundary, the planned public surface, and the work
-required to reach an initial release.
+Pi Subagent Runtime is a pure execution kernel for caller-prepared Pi agents.
+It is infrastructure for other extensions and applications, not another
+user-facing subagent product.
+
+The initial release will not register a model-callable tool, discover agent
+personas, construct task prompts, own a UI, or provide workflows. Pi Forge is
+the first host: it owns profiles, prompt compilation, policy, approval, and
+presentation, while this package owns execution integrity and lifecycle.
 
 ## Problem
 
-Pi already has several capable subagent extensions. Most combine execution
-with one or more higher-level concerns:
+Pi has capable user-facing subagent packages and more than one package with a
+programmatic API. The missing boundary is narrower:
 
-- named agent discovery and bundled presets;
-- prompt construction and context inheritance;
-- workflow chains, scheduling, memory, or steering;
-- worktree management and rich session UI.
+> Execute a caller-compiled, ordered Pi conversation through an explicitly
+> selected backend, without reinterpreting it, silently weakening its
+> requirements, or overstating the boundary that was enforced.
 
-Those products are useful when they own the complete subagent experience. They
-are harder for another extension to embed without also adopting their prompt,
-agent, and orchestration conventions.
+A profile manager, review tool, workflow engine, sandbox provider, or remote
+execution service should be able to use a Pi agent without adopting a runtime's
+agent-file format, prompt conventions, model routing, workflow syntax, or UI.
 
-Pi Subagent Runtime targets the lower-level gap:
+## Ownership boundary
 
-> Run a caller-prepared Pi agent without taking ownership of its prompt,
-> profile, policy, workflow, or UI.
+The host owns:
 
-The runtime should serve profile managers, review tools, workflow engines,
-sandbox providers, remote execution adapters, and other packages that need a
-subagent execution provider rather than another orchestration product.
+- profiles, prompt stacks, personas, and task semantics;
+- selected context and the exact ordered conversation;
+- model and backend selection policy;
+- requested tools, access, limits, and provider-egress consent;
+- human approval and other authorization decisions;
+- workflows, retries, scheduling, parallel fan-out, and result synthesis;
+- UI, persistence, artifacts, and product-specific result formats.
+
+The runtime owns:
+
+- backend registration and descriptor validation;
+- preflight and capability negotiation;
+- mediation of exact or backend-assisted host preparation;
+- plan validation, sealing, binding, and runtime-generated conversation and
+  execution fingerprints;
+- public lifecycle, event delivery, cancellation arbitration, and exactly-once
+  terminal settlement;
+- invocation and verification of backend preparation and execution cleanup;
+- bounded in-memory diagnostics and terminal result normalization;
+- validation of backend enforcement receipts against accepted capabilities.
+
+The backend owns:
+
+- model, authentication, tool, media, and runtime discovery;
+- faithful materialization of the prepared system prompt and ordered messages;
+- process, workspace, network, and tool enforcement it claims to provide;
+- implementation of accepted limits;
+- provider transport, streaming, cancellation handling, and actual resource
+  cleanup when the runtime invokes its lifecycle hooks;
+- an accurate enforcement receipt describing what happened.
+
+An enforcement receipt is a backend attestation, not independent proof. The
+runtime validates its consistency and publishes conformance tests, but callers
+must decide which backend implementations they trust.
 
 ## Design principles
 
 ### Prepared, not reinterpreted
 
-A caller can provide an exact system prompt and ordered message sequence. Once
-the execution plan is sealed, the runtime and backend must not wrap, rewrite,
-or silently downgrade it.
+The host compiler produces the final system prompt and ordered message
+sequence. The runtime and backend must not add role instructions, task
+wrappers, inherited context, skills, or other model-visible content after the
+plan is sealed.
 
-### Policy belongs to the caller
+### Preparation is explicitly two-phase
 
-The runtime does not define researcher, planner, reviewer, or worker roles. It
-does not choose a model-selection strategy or invent prompt context. A
-convenience task API may provide conservative defaults, but the prepared-run
-API remains the authoritative integration boundary.
+Some Pi prompt inputs are available only inside `before_agent_start`.
+Therefore a host cannot always compile the exact plan before accepting a
+backend. The contract must support:
 
-### Capabilities are negotiated before execution
+```text
+host execution intent
+    -> explicit backend preflight
+    -> exact or backend-assisted host compilation
+    -> runtime validation and plan sealing
+    -> optional host approval
+    -> execution
+```
 
-Backends advertise the access modes, limits, media types, cancellation, and
-isolation properties they support. A run is rejected during preflight when its
-requirements cannot be met.
+The host compiler remains authoritative even when a backend supplies runtime
+inputs. A backend may invoke the compiler through the runtime, but may not
+replace or modify its result.
 
-### Safety claims must match enforcement
+### Backend selection is caller policy
 
-Restricting the tools visible to a model is useful, but it is not an operating
-system sandbox. Results include an enforcement receipt describing the actual
-boundary, such as:
+Every preparation names a backend ID. The runtime does not select the first
+compatible backend or silently fall back to another one. A host may implement
+its own selection policy by inspecting registered descriptors.
 
-- tool-policy-only versus OS-enforced filesystem access;
-- shared-user versus isolated process execution;
-- enforced versus unenforced network policy;
-- hard, host-abort, best-effort, or unsupported limits.
+If an application wants a default backend, it must configure that default
+explicitly outside the core runtime.
 
-The runtime must fail closed when a required guarantee cannot be provided.
+### Capabilities are negotiated before provider transport
 
-### Background work is still structured work
+Backends advertise prompt fidelity, model and tool availability, media types,
+access enforcement, limit enforcement, cancellation, and execution boundary.
+A run is rejected before provider transport when a required property cannot be
+provided.
 
-Every run has an explicit owner, lifecycle, cancellation path, terminal result,
-and bounded retained output. Background execution does not mean detached,
-unobservable, or immortal execution.
+### Safety terms describe actual enforcement
 
-### Composition over workflow features
+Restricting model-visible tools is not an operating-system sandbox. Receipts
+must distinguish:
 
-Parallel execution is a bounded collection of ordinary runs. Higher-level
-chains, DAGs, synthesis, scheduling, and supervisor behavior should be built by
-consumers through the API rather than embedded in the execution kernel.
+- tool-policy-only from OS-enforced filesystem access;
+- shared-user from isolated process execution;
+- enforced from unenforced network policy;
+- backend-hard, host-abort, best-effort, and unsupported limits.
 
-## Intended architecture
+A sandboxed backend and a shared-user subprocess are useful for different
+purposes and must not report equivalent guarantees.
 
-The initial release is planned as one npm package with layered exports:
+### Sealing belongs to the runtime
+
+The caller may provide source and provenance fingerprints. The runtime computes
+the conversation fingerprint after host compilation, then computes the
+execution fingerprint after binding the accepted backend and preflight. A
+caller cannot supply or recompute substitute fingerprints to authorize a
+changed plan.
+
+The registry binds execution to the exact accepted backend, preflight,
+conversation, tool mapping, access receipt, limits, and runtime inputs.
+Equivalent conversations executed by different backends may have the same
+conversation fingerprint but must have different execution fingerprints.
+
+### Core contracts are Pi-version-light
+
+Core contracts use portable data rather than Pi SDK objects. The core should
+not expose `ExtensionContext`, `ModelRegistry`, `ModelRuntime`, `AgentSession`,
+or provider credentials.
+
+Pi-specific imports and version compatibility belong inside backend entry
+points. A Pi SDK or RPC change should normally require updating a backend, not
+the core contract or every host.
+
+### Lifecycle is structured but not orchestrated
+
+Executing a prepared plan returns a handle with events, cancellation, and one
+terminal result. The core does not own batch scheduling, background job
+persistence, chains, retries, or supervisor behavior. Hosts compose ordinary
+runs as needed.
+
+## Package architecture
+
+The pre-alpha can remain one repository and npm package with isolated entry
+points:
 
 ```text
 @zihanw/pi-subagent-runtime
-├── core                  contracts, runtime, queue, lifecycle, receipts
-├── backend               backend interface and capability negotiation
-├── backends/sdk          in-process Pi session backend
-├── backends/subprocess   child Pi process backend
-└── pi                    optional user-facing Pi extension
+├── core                    portable contracts and validators
+├── runtime                 registry, preparation, sealing, lifecycle
+├── testing                 reusable backend conformance suite
+├── backends/subprocess     fresh Pi child-process backend
+└── backends/rpc            fresh Pi RPC child-process backend
 ```
 
-The package has two entry paths:
+`core`, `runtime`, and `testing` must contain no Pi SDK imports. Pi dependencies
+are optional peers used only by backend entry points. Backends may be split
+into separately versioned packages later if Pi compatibility creates release
+pressure.
 
-1. **Prepared runs** for extensions that already own prompts, profiles, tools,
-   and policy.
-2. **Task runs** for direct users who want a small, conservative subagent
-   experience without first installing an orchestration framework.
+The initial process adapters share an adapter-private, Pi-SDK-backed
+preparation component. That component owns the temporary `AgentSession`,
+`before_agent_start` provider gate, and Pi runtime extraction needed for exact
+host compilation. Its Pi version coupling remains confined to the backend
+entry points.
 
-Both paths resolve to the same sealed execution plan and backend contract.
+There is deliberately no `pi` extension entry point in the initial release.
 
-## Proposed contracts
+## Contract direction
 
-The exact names may change during the pre-alpha, but the intended service
-surface is small:
+Names remain provisional, but the public interaction should follow this shape:
 
 ```ts
-interface SubagentRuntime {
-  spawn(spec: TaskRun | PreparedRun): RunHandle;
-  spawnMany(specs: readonly RunSpec[], options?: BatchOptions): RunHandle[];
-  get(id: string): RunSnapshot | undefined;
-  list(): RunSnapshot[];
-  wait(id: string): Promise<RunResult>;
-  cancel(id: string, reason?: string): Promise<void>;
-  registerBackend(backend: SubagentBackend): Disposable;
-  subscribe(listener: RunEventListener): Disposable;
+interface ExecutionRuntime {
+  prepare(request: PrepareRequest): Promise<PreparedRun>;
+  execute(prepared: PreparedRun): RunHandle;
+  registerBackend(backend: ExecutionBackend): Disposable;
+  listBackends(): BackendDescriptor[];
+  dispose(): Promise<void>;
 }
-```
 
-A prepared run carries the exact execution intent:
+interface PrepareRequest {
+  backendId: string;
+  intent: ExecutionIntent;
+  compile(runtime: PromptRuntime): Promise<PreparedConversation>;
+}
 
-```ts
-interface PreparedRun {
-  kind: "prepared";
-  systemPrompt: string;
-  messages: PreparedMessage[];
+interface ExecutionIntent {
   model: ModelReference;
   thinkingLevel?: string;
-  tools: ToolReference[];
+  requestedTools: string[];
   access: AccessRequest;
-  limits: RunLimits;
+  limits: LimitRequest;
+  media?: MediaReference[];
   provenance?: Record<string, string>;
-  fingerprint: string;
 }
-```
 
-Every spawn returns a handle immediately:
+interface PreparedConversation {
+  systemPrompt: string;
+  messages: PreparedMessage[];
+}
 
-```ts
+interface PreparedRun {
+  id: string;
+  backendId: string;
+  conversationFingerprint: string;
+  executionFingerprint: string;
+  snapshot(): SealedPlanSnapshot;
+  discard(): Promise<void>;
+}
+
 interface RunHandle {
   id: string;
   snapshot(): RunSnapshot;
@@ -146,167 +229,351 @@ interface RunHandle {
 }
 ```
 
-All runs are asynchronous. A foreground caller awaits `handle.result`; a
-background caller retains the handle and continues. Parallel fan-out uses the
-same bounded queue.
+Important invariants:
 
-Direct imports will be the primary integration mechanism. A versioned,
-process-local service or Pi event bridge may be provided for sibling extensions
-that cannot take a direct package dependency.
+- `PreparedRun` is produced only by the runtime after accepted preflight and
+  host compilation.
+- `conversationFingerprint` binds the exact system prompt and ordered messages.
+- `executionFingerprint` is runtime-generated.
+- `execute()` accepts the prepared handle bound to the creating runtime, not an
+  arbitrary caller-constructed plan.
+- The snapshot is inspectable for approval but cannot be used to execute a
+  modified substitute.
+- Preparation can be discarded without provider transport.
+- All terminal paths settle once and complete backend cleanup.
 
-## Planned direct-user defaults
+Discard is the explicit path for an approval that is abandoned. Compiler or
+preparation failure automatically invokes backend preparation cleanup.
+Unregistering a backend prevents new preparations but does not invalidate
+already-bound handles; those handles retain a backend lease until execution or
+discard. Disposing the runtime rejects new work, discards outstanding
+preparations, cancels active runs, and awaits backend cleanup.
 
-The optional Pi extension should make the basics useful without creating a
-second orchestration product:
+A convenience API for already-compiled conversations may be added later, but
+it must still perform backend preflight and runtime sealing.
 
-- one small subagent tool;
-- single and parallel task submission;
-- foreground and session-scoped background execution;
-- status, wait, list, and cancel operations;
-- a bounded concurrency queue;
-- fresh child context by default;
-- read-oriented tools by default;
-- child extensions and skills disabled by default;
-- writable access and recursive delegation disabled by default;
-- depth, run-count, timeout, turn, and output limits;
-- cancellation propagation and child-process cleanup;
-- explicit project-trust checks;
-- bounded logs and structured terminal results.
+## Backend contract
 
-Background jobs in the first release are session-scoped. Durable jobs that
-survive Pi restarts require persistence, locking, reconciliation, and migration
-semantics and are not part of the initial scope.
+A backend is more than a process transport. It must implement the runtime's
+preflight, preparation, execution, cancellation, cleanup, and receipt
+semantics.
 
-## Safety model
-
-A caller states the boundary it requires. A backend returns capabilities during
-preflight and, if accepted, an enforcement receipt with the result.
-
-A model-visible read-only tool set does not prove filesystem isolation. For
-example, a shared-user subprocess might report:
+A provisional SPI is:
 
 ```ts
-{
-  executionBoundary: "shared-user",
-  filesystem: "tool-policy",
-  network: "not-enforced",
-  process: "not-exposed-to-agent",
+interface ExecutionBackend {
+  readonly descriptor: BackendDescriptor;
+
+  preflight(intent: ExecutionIntent): Promise<BackendPreflightResult>;
+
+  prepare(
+    input: AcceptedPreparationInput,
+    context: {
+      compile(runtime: PromptRuntime): Promise<PreparedConversation>;
+      signal: AbortSignal;
+    },
+  ): Promise<BackendPreparation>;
+
+  start(
+    input: BoundExecutionInput,
+    context: {
+      emit(event: BackendRunEvent): void;
+      signal: AbortSignal;
+    },
+  ): Promise<BackendExecution>;
+
+  discard(preparation: BackendPreparation): Promise<void>;
+}
+
+interface BackendExecution {
+  result: Promise<BackendResult>;
+  cancel(reason?: string): Promise<void>;
+  dispose(): Promise<void>;
 }
 ```
 
-A sandbox backend may advertise and report stronger enforcement. The common
-contract must support both without describing them as equivalent.
+`BackendPreparation` is backend-opaque state retained by the runtime-bound
+prepared handle. `prepare()` is failure-atomic: if the compiler callback or
+backend setup fails before it returns, the backend releases its partial
+resources before rejecting. After it returns, the runtime validates the
+compiler result before sealing it and invokes `discard()` if validation,
+sealing, execution startup, or host approval does not complete.
+
+The runtime passes the bound plan back to `start`. Backend events are
+non-terminal; completion, failure, cancellation, timeout, and cleanup errors
+compete through the runtime's exactly-once terminal arbiter. The runtime always
+invokes `dispose()` after terminal settlement.
+
+Likely backend families include:
+
+- in-process Pi SDK;
+- fresh Pi subprocess;
+- fresh or managed Pi RPC process;
+- sandboxed subprocess or RPC;
+- container worker;
+- remote Pi worker;
+- deterministic fake backend for conformance tests.
+
+The runtime does not infer that RPC, a worktree, or a tool allowlist is a
+sandbox. Each backend advertises only the guarantees it can actually enforce.
+
+## First reference backends
+
+### Pi subprocess backend
+
+The first backend is adapted from Pi Forge's existing
+`pi-subprocess-readonly` implementation. It is a hybrid backend: an in-process
+Pi SDK `AgentSession` and provider gate perform exact preparation, then a fresh
+Pi child process performs execution. It is the baseline because it already
+demonstrates:
+
+- backend-assisted exact prompt preparation;
+- runtime-bound immutable plans;
+- a fresh Pi process with explicit model, thinking, and tool selection;
+- a trusted bridge that installs the exact system prompt and ordered messages;
+- disabled ambient extensions, skills, templates, themes, and context files;
+- cancellation with bounded TERM-to-KILL escalation;
+- bounded and sanitized reporting;
+- honest `shared-user` enforcement receipts.
+
+The initial extraction should preserve behavior before generalizing it.
+
+### Pi RPC backend
+
+RPC is a good second backend because Pi provides a documented JSONL protocol
+for prompting, events, model and thinking control, abort, state, messages, and
+usage.
+
+For the first implementation:
+
+- start a fresh `pi --mode rpc` process per execution;
+- use `--no-session` and disable ambient resources;
+- load only the trusted prepared-message bridge;
+- send a unique marker prompt through RPC;
+- have the bridge replace that marker with the sealed ordered messages before
+  the first provider request;
+- stream RPC lifecycle and tool events into runtime events;
+- use RPC `abort`, followed by process termination if it does not settle;
+- collect terminal output and usage through documented RPC commands/events;
+- report a shared-user boundary unless the entire process is launched through
+  a separate sandbox implementation.
+
+The first RPC backend will not provide:
+
+- process pooling or reuse;
+- session resume, fork, clone, or durable history;
+- steering or follow-up product behavior;
+- dynamic system-prompt or tool changes after process launch;
+- stronger filesystem or network guarantees than its process launcher
+  enforces.
+
+RPC simplifies execution control, but not exact compilation. Backend-assisted
+preparation still requires the host compiler and, initially, the same
+Pi-SDK-backed `AgentSession` provider gate as the subprocess backend. The first
+spike must prove that the RPC bridge preserves the same conversation
+fingerprint, system prompt, ordered messages, and effective tools as the
+subprocess backend; their execution fingerprints are expected to differ. If
+the spike finds a documented RPC-native source for the exact prompt runtime,
+the SDK preparation dependency may be removed from that adapter. Otherwise it
+remains an explicit, backend-local Pi version coupling. If exact fidelity
+cannot be established, the RPC backend must advertise reduced fidelity and
+reject incompatible plans.
+
+## Safety model
+
+A caller states required properties. A backend advertises capabilities during
+preflight and returns actual enforcement receipts during execution.
 
 The runtime rejects a run when:
 
+- the explicitly requested backend is missing;
 - a required access property cannot be enforced;
-- the selected model or tool set cannot be provided faithfully;
-- an accepted plan differs from the sealed execution fingerprint;
-- a backend claims a capability it did not advertise;
-- a required hard limit is only available as best-effort.
+- the selected model, thinking level, media, or tool mapping cannot be
+  provided faithfully;
+- exact host preparation cannot finish before provider transport;
+- an execution plan differs from the registry-bound sealed plan;
+- a backend returns a receipt inconsistent with its accepted descriptor;
+- a required hard limit is available only as host-abort or best-effort.
 
-## Extension points
+The runtime cannot detect every dishonest backend claim. Backend trust and
+conformance evidence remain explicit caller concerns.
 
-The runtime should expose stable seams for:
+## Initial v0.1 scope
 
-- **backends** — in-process Pi, subprocess Pi, sandboxed, container, or remote;
-- **host compilers** — translate profiles, prompt stacks, or domain-specific
-  configuration into a prepared run;
-- **workspace providers** — allocate and clean up an execution workspace;
-- **policy providers** — validate an intent before the plan is sealed;
-- **observers** — consume lifecycle events without mutating sealed plans;
-- **renderers and UIs** — present progress, results, and history;
-- **transports** — offer versioned process-local or remote access to the
-  runtime.
+The first useful release contains:
 
-Extensions may participate before a plan is sealed or observe it afterward.
-They must not mutate an accepted plan during backend execution.
+1. versioned portable intent, prompt-runtime, prepared-message, plan, result,
+   event, capability, and enforcement-receipt contracts;
+2. canonical serialization and runtime-generated conversation and execution
+   fingerprints;
+3. backend registration and explicit backend lookup;
+4. validated preflight and exact/backend-assisted host preparation;
+5. sealed plan binding, inspection, discard, and execution;
+6. run handles, event subscription, cancellation, terminal normalization, and
+   cleanup;
+7. reusable fake-backend conformance tests;
+8. the adapted fresh subprocess backend;
+9. a constrained fresh-process RPC backend after its fidelity spike passes;
+10. Pi Forge migrated as the first host;
+11. one independent API fixture that owns its own prompt without importing
+    Forge concepts.
 
-## Initial scope
-
-The first useful release should provide:
-
-1. versioned run, backend, result, and enforcement-receipt contracts;
-2. backend registration and capability discovery;
-3. preflight, plan sealing, execution, cancellation, and cleanup;
-4. an in-process no-tool Pi backend;
-5. a conservative Pi subprocess backend;
-6. session-scoped background runs and bounded parallel execution;
-7. a thin optional Pi extension;
-8. conformance tests reusable by third-party backend authors;
-9. Pi Forge as the first prepared-run consumer;
-10. one independent example extension as proof that the API is not
-    Forge-specific.
+The independent fixture proves portability, not ecosystem demand. Publication
+and stability still require a genuine second consumer or backend author.
 
 ## Explicit non-goals
 
-The core project does not plan to own:
+The initial project does not own:
 
-- bundled agent personas or prompt presets;
-- agent Markdown discovery;
+- a model-callable subagent tool or Pi command;
+- bundled agent personas, prompt presets, or agent Markdown discovery;
+- task-to-prompt construction or automatic parent-context inheritance;
 - prompt-stack or profile management;
-- chain, DAG, or workflow languages;
-- cron or scheduled execution;
-- persistent agent memory;
-- model routing or fallback policy;
+- model routing, backend fallback, or provider fallback;
+- batch queues, background jobs, chains, DAGs, retries, or scheduling;
+- persistent memory or durable sessions;
 - worktree orchestration;
-- inter-agent messaging or supervisor interviews;
-- rich conversation viewers;
-- acceptance criteria or domain-specific result formats.
+- inter-agent messaging, steering UX, or supervisor interviews;
+- rich viewers, approval UI, or product-specific rendering;
+- artifact stores or domain-specific result formats;
+- a built-in sandbox or container manager.
 
-These may be implemented by consumers or optional companion packages. Keeping
-them outside the runtime is a product boundary, not a missing-feature list.
+These belong to hosts or separately versioned backend/companion packages.
 
 ## Relationship to Pi Forge
 
-The runtime is being incubated from the experimental subagent adapter in
-[`@zihanw/pi-forge`](https://github.com/MacroSony/pi-forge). Pi Forge will
-continue to own profile resolution, prompt-stack compilation, policy, and
-fingerprints. It will hand the runtime a sealed prepared plan and verify the
-returned enforcement receipt.
+The runtime is extracted from the experimental adapter in
+[`@zihanw/pi-forge`](https://github.com/MacroSony/pi-forge).
 
-Pi Forge is the first consumer, not a required dependency. The runtime API
-should remain useful to an extension that knows nothing about Forge profiles or
-prompt stacks.
+Pi Forge continues to own:
 
-## Roadmap
+- profile and prompt-stack resolution;
+- trusted macro and slot dependencies;
+- selected-context compilation and protected task assembly;
+- project trust, egress consent, and human approval;
+- product UI and report rendering;
+- Forge-specific provenance fingerprints.
 
-### 0. Contract
+The runtime owns the generic backend registry, execution fingerprint, binding,
+lifecycle, and receipts. Forge compiles through the runtime's host callback,
+inspects the sealed plan, authorizes it, and executes the prepared handle.
 
-- Extract generic run and backend contracts from Pi Forge.
-- Remove Forge-specific profile concepts from the runtime boundary.
-- Document safety terminology and invariants.
+## First implementation sequence
 
-### 1. Runtime
+### 0. Preserve the evidence
 
-- Implement lifecycle management, bounded concurrency, cancellation, and
-  result retention.
-- Port the SDK and subprocess backends.
-- Publish backend conformance tests.
+- Record the current Forge test baseline.
+- Identify generic modules and Forge-specific modules before moving code.
+- Copy tests with their implementation, then rename and generalize in small
+  steps.
+- Do not change Forge behavior during the initial extraction.
 
-### 2. Pi extension
+The initial extraction map is:
 
-- Add the minimal direct-user tool and status command.
-- Validate foreground, background, and parallel behavior.
-- Exercise the public API through Pi Forge and an independent example.
+| Forge source | Initial treatment |
+| --- | --- |
+| `canonical.ts`, generic diagnostics, and pure validators | Adapt into `core` |
+| portable portions of `types.ts` | Split into versioned `core` contracts |
+| `backend-registry.ts`, preflight, plan binding, and response settlement | Adapt into `runtime` |
+| fake backend and backend conformance tests | Adapt into `testing` first |
+| `pi-subprocess-backend.ts`, `subprocess-bridge.ts`, and subprocess reporting | Adapt into `backends/subprocess` |
+| `pi-sdk-backend.ts` and `pi-model-runtime.ts` | Keep as backend research; do not put Pi types in core |
+| request/profile/context/task construction and tool resource policy | Leave in Forge |
+| Forge commands, model-callable tool, approval, and rendering | Leave in Forge |
 
-### 3. Ecosystem
+### 1. Extract the portable core
 
-- Stabilize the process-local service contract.
-- Support third-party workspace, sandbox, UI, and remote backends.
-- Consider durable background execution only if real consumers require it.
+- Port canonical JSON, fingerprints, diagnostics, access and limit types,
+  prepared messages, backend descriptors, results, and pure validators.
+- Remove `AgentProfile`, `PromptStack`, Forge dependency receipts, and Pi SDK
+  objects from the portable boundary.
+- Replace caller-supplied execution fingerprints with runtime-generated ones.
+- Add contract tests proving the core has no Pi package imports.
 
-## Project test
+### 2. Extract the registry and lifecycle
 
-The architecture is succeeding if:
+- Port backend registration, preflight binding, backend-assisted preparation,
+  plan binding, cancellation arbitration, and result normalization.
+- Make backend ID mandatory during preparation.
+- Return inspectable prepared handles and execution run handles.
+- Make compiler/setup failure, discard, unregister, start failure, cancellation,
+  and runtime disposal release their backend resources exactly once.
+- Keep batching, queueing, persistence, and process-local global services out.
 
-- Pi Forge can use it without private integration hooks;
-- an unrelated extension can prepare and run agents without adopting Forge;
-- backends can be replaced without changing caller-owned prompts or policy;
-- unsupported guarantees are rejected rather than silently weakened;
-- the default extension remains understandable without learning a workflow
-  language.
+### 3. Port the subprocess backend
 
-If the runtime begins accumulating agent presets, prompt opinions, workflow
-syntax, or product-specific UI, it has crossed the boundary this project exists
-to preserve.
+- Move the existing preparation and execution bridge with behavior-preserving
+  tests.
+- Generalize Forge names and report types.
+- Preserve bounded output, cancellation draining, and shared-user receipts.
+- Run the reusable backend conformance suite.
+
+### 4. Spike and implement the RPC backend
+
+- Build a minimal strict-LF JSONL RPC client.
+- Launch a fresh hermetic RPC process.
+- Reuse the adapter-private Pi SDK preparation component unless the spike proves
+  an exact RPC-native replacement.
+- Reuse the prepared-message bridge and marker replacement.
+- Compare conversation fingerprints and prove exact prompt/message/tool
+  fidelity before provider transport; expect backend-bound execution
+  fingerprints to differ.
+- Map settled events, usage, abort, process escalation, and cleanup.
+- Reject unsupported plans rather than weakening them.
+
+### 5. Migrate Pi Forge
+
+- Replace Forge's private registry/backend ownership with the runtime package.
+- Keep Forge compilation, approval, and UI unchanged.
+- Compare plan fingerprints and terminal reports against the pre-extraction
+  fixtures.
+- Dogfood both subprocess and RPC backends without changing the user-facing
+  Forge workflow.
+
+### 6. Validate independence
+
+- Add a small non-Forge host fixture with its own prompt compiler.
+- Publish backend-author documentation and the conformance harness.
+- Seek a genuine second consumer or backend before declaring the contract
+  stable.
+
+## First coding slice
+
+The first implementation change should stop before launching a real Pi
+process. It should:
+
+1. scaffold the strict TypeScript package and public entry points;
+2. adapt portable contracts, canonical serialization, fingerprints, and pure
+   validation from Forge;
+3. implement explicit backend registration, preparation, sealing, inspection,
+   discard, and one-shot execution;
+4. adapt the deterministic fake backend and the smallest conformance harness;
+5. prove that an unregistered backend, incompatible intent, forged prepared
+   handle, changed sealed plan, double execution, competing terminal causes,
+   compiler/setup failure, abandoned preparation, unregister, and runtime
+   disposal settle or clean up exactly once.
+
+This slice establishes the boundary against a deterministic backend. The next
+change ports the known-good subprocess implementation without redesigning it.
+The RPC fidelity spike then becomes a second adapter over a stable contract
+instead of defining the contract through RPC's current command set.
+
+## v0.1 completion criteria
+
+The first release is ready when:
+
+- Pi Forge uses the public runtime without private integration hooks;
+- the portable core imports no Pi SDK types;
+- backend selection is explicit and no fallback occurs;
+- both reference backends either preserve the same sealed conversation or
+  reject unsupported fidelity before transport;
+- required guarantees fail closed;
+- receipts distinguish shared-user tool policy from OS enforcement;
+- cancellation, timeout, malformed output, and provider failure settle once
+  and clean up;
+- the conformance suite can validate a backend outside Pi Forge;
+- no user-facing tool, persona, workflow, queue, or UI has entered the core.
+
+The project should pause before API stabilization if no second real consumer or
+backend author needs the boundary. Pi Forge alone proves feasibility, not an
+ecosystem.
