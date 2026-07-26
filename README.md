@@ -119,11 +119,18 @@ execution in a fresh Pi subprocess through the trusted prepared-message
 bridge. It preserves bounded sanitized reporting, cancellation draining with
 TERM-to-KILL escalation, and honest `shared-user` enforcement receipts.
 
-A fresh-process Pi RPC backend follows as the second adapter. It will use Pi's
-documented JSONL protocol for events, abort, state, and usage, while reusing the
-same SDK-backed preparation gate and trusted prepared-message bridge to install
-the sealed ordered conversation. RPC process reuse, resume, fork, steering, and
-durable sessions are outside the initial scope.
+The second backend, available at
+`@zihanw/pi-subagent-runtime/backends/rpc`, launches a fresh `pi --mode rpc`
+process per execution. It uses Pi's documented strict-LF JSONL protocol for
+the marker prompt, lifecycle events, abort, and settlement, while sharing the
+same SDK-backed preparation gate and the same trusted prepared-message bridge
+as the subprocess backend. Both backends seal the identical compiled
+conversation (equal conversation fingerprints) with distinct backend-bound
+execution fingerprints. RPC process reuse, resume, fork, steering, and durable
+sessions remain outside the initial scope.
+
+Cancellation uses the documented RPC `abort` command first and escalates to
+bounded TERM-to-KILL process termination when the run does not settle.
 
 Both initial process backends report a shared-user boundary unless a separate
 sandbox implementation launches the entire process under stronger

@@ -694,6 +694,10 @@ function assertContainsFlag(args: string[], flag: string, value: string): void {
 
 function subprocessTempDirectories(): string[] {
   return readdirSync(tmpdir())
-    .filter((name) => name.startsWith("pi-subagent-runtime-"))
+    .filter(
+      (name) =>
+        name.startsWith("pi-subagent-runtime-prepare-") ||
+        name.startsWith("pi-subagent-runtime-run-"),
+    )
     .sort();
 }
