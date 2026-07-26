@@ -26,7 +26,8 @@ const PROVIDER = "pi-independent-host-e2e";
 const MODEL_ID = "fixture-model";
 const RESPONSE_TEXT = "Independent E2E complete.";
 
-const PI_CLI = resolvePiCli();
+const E2E_ENABLED = process.env.PI_SUBAGENT_RUNTIME_E2E === "1";
+const PI_CLI = E2E_ENABLED ? resolvePiCli() : undefined;
 
 const PROFILE: MiniProfile = {
 	id: "mini-reviewer",
@@ -38,7 +39,14 @@ const PROFILE: MiniProfile = {
 
 test(
 	"independent host prepares, approves, and executes the same plan on real pi children in both modes",
-	{ skip: PI_CLI === undefined ? "pi CLI is not available" : false, timeout: 120_000 },
+	{
+		skip: !E2E_ENABLED
+			? "set PI_SUBAGENT_RUNTIME_E2E=1 to run real-pi end-to-end tests"
+			: PI_CLI === undefined
+				? "pi CLI is not available"
+				: false,
+		timeout: 120_000,
+	},
 	async () => {
 		const root = mkdtempSync(join(tmpdir(), "pi-subagent-runtime-host-e2e-"));
 		const agentDir = join(root, "agent");

@@ -49,6 +49,8 @@
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
     "test": "npm run build && node --test --test-concurrency=1 \"tests/*.test.ts\"",
+    "test:fast": "node --test --test-concurrency=1 \"tests/*.test.ts\"",
+    "test:e2e": "npm run build && PI_SUBAGENT_RUNTIME_E2E=1 node --test --test-concurrency=1 \"tests/*.e2e.test.ts\"",
     "verify": "npm test && npm run typecheck && npm run build"
   },
   "devDependencies": {
