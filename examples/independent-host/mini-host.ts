@@ -3,6 +3,7 @@ import {
 	conversationFingerprint,
 	createExecutionRuntime,
 	validateExecutionIntent,
+	type BackendPreflightAccepted,
 	type ExecutionBackend,
 	type ExecutionIntent,
 	type ExecutionRuntime,
@@ -83,6 +84,7 @@ export class MiniHost {
 		profile: MiniProfile,
 		task: string,
 		backendId: string,
+		signal?: AbortSignal,
 	): Promise<MiniApprovedRun> {
 		const intent = this.intentFor(profile);
 		const diagnostics = validateExecutionIntent(intent);
@@ -94,7 +96,9 @@ export class MiniHost {
 		const prepared = await this.#runtime.prepare({
 			backendId,
 			intent,
-			compile: async (runtime) => this.#compile(profile, task, runtime),
+			...(signal ? { signal } : {}),
+			compile: async (runtime, preflight) =>
+				this.#compile(profile, task, runtime, preflight),
 		});
 		return { prepared, plan: prepared.snapshot() };
 	}
@@ -108,9 +112,14 @@ export class MiniHost {
 		profile: MiniProfile,
 		task: string,
 		runtime: PromptRuntime,
+		preflight: BackendPreflightAccepted,
 	): PreparedConversation {
+		const acceptedTools = new Map(
+			preflight.toolCatalog.map((tool) => [tool.name, tool]),
+		);
 		const toolLines = runtime.options.selectedTools.map(
-			(id) => `- ${id}: ${runtime.options.toolSnippets[id] ?? "available"}`,
+			(id) =>
+				`- ${id}: ${runtime.options.toolSnippets[id] ?? "available"} (backend tool ${acceptedTools.get(id)?.id ?? "unbound"})`,
 		);
 		return {
 			systemPrompt: [

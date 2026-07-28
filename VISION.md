@@ -193,7 +193,11 @@ interface ExecutionRuntime {
 interface PrepareRequest {
   backendId: string;
   intent: ExecutionIntent;
-  compile(runtime: PromptRuntime): Promise<PreparedConversation>;
+  signal?: AbortSignal;
+  compile(
+    runtime: PromptRuntime,
+    preflight: BackendPreflightAccepted,
+  ): Promise<PreparedConversation>;
 }
 
 interface ExecutionIntent {
@@ -233,6 +237,10 @@ Important invariants:
 
 - `PreparedRun` is produced only by the runtime after accepted preflight and
   host compilation.
+- The host compiler receives the validated accepted preflight that authorizes
+  its compilation; mutating that cloned input cannot alter the sealed plan.
+- A caller-provided preparation signal covers preflight and backend-assisted
+  preparation, is detached on settlement, and does not cancel a prepared run.
 - `conversationFingerprint` binds the exact system prompt and ordered messages.
 - `executionFingerprint` is runtime-generated.
 - `execute()` accepts the prepared handle bound to the creating runtime, not an

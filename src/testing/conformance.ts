@@ -2,6 +2,7 @@ import {
   hasErrors,
   validateRunResult,
   validateSealedPlanSnapshot,
+  type BackendPreflightAccepted,
   type ExecutionIntent,
   type PreparedConversation,
   type PromptRuntime,
@@ -16,7 +17,10 @@ import {
 export interface BackendConformanceFixture {
   backend: ExecutionBackend;
   intent(): ExecutionIntent;
-  compile(runtime: PromptRuntime): Promise<PreparedConversation>;
+  compile(
+    runtime: PromptRuntime,
+    preflight: BackendPreflightAccepted,
+  ): Promise<PreparedConversation>;
 }
 
 export interface BackendConformanceReport {
@@ -60,9 +64,9 @@ export async function runBackendConformance(
     const prepared = await runtime.prepare({
       backendId: fixture.backend.descriptor.id,
       intent: fixture.intent(),
-      compile: async (promptRuntime) => {
+      compile: async (promptRuntime, preflight) => {
         compilerCalls += 1;
-        return fixture.compile(promptRuntime);
+        return fixture.compile(promptRuntime, preflight);
       },
     });
     requireCondition(

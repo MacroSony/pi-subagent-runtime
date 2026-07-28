@@ -180,6 +180,15 @@ class ExecutionRuntimeImpl implements ExecutionRuntime {
         "Prepare request must provide a compiler callback.",
       );
     }
+    if (
+      request.signal !== undefined &&
+      !(request.signal instanceof AbortSignal)
+    ) {
+      throw runtimeError(
+        "preparation.signal",
+        "Prepare request signal must be an AbortSignal.",
+      );
+    }
 
     const entry = this.#backends.get(request.backendId);
     if (!entry) {
@@ -202,10 +211,16 @@ class ExecutionRuntimeImpl implements ExecutionRuntime {
       );
     }
 
-    const operation = createPreparationOperation();
+    const operation = createPreparationOperation(request.signal);
     this.#preparing.add(operation);
     let returnedPreparation: BackendPreparation | undefined;
     try {
+      if (operation.controller.signal.aborted) {
+        throw runtimeError(
+          "preflight.cancelled",
+          "Preflight was cancelled.",
+        );
+      }
       let preflightValue: unknown;
       try {
         preflightValue = await entry.backend.preflight({
@@ -222,6 +237,12 @@ class ExecutionRuntimeImpl implements ExecutionRuntime {
             : `Backend preflight failed: ${errorMessage(cause)}`,
           [],
           cause,
+        );
+      }
+      if (operation.controller.signal.aborted) {
+        throw runtimeError(
+          "preflight.cancelled",
+          "Preflight was cancelled.",
         );
       }
       const preflight = cloneCanonical(
@@ -256,6 +277,16 @@ class ExecutionRuntimeImpl implements ExecutionRuntime {
         );
       }
       this.#acceptedPreflightKeys.add(preflightKey);
+      if (operation.controller.signal.aborted) {
+        throw runtimeError(
+          "preparation.cancelled",
+          "Backend preparation was cancelled.",
+        );
+      }
+      const effectiveTools = bindEffectiveTools(
+        preflight,
+        intent.requestedTools,
+      );
 
       let compiledRuntime: PromptRuntime | undefined;
       let compiledConversation: PreparedConversation | undefined;
@@ -322,11 +353,18 @@ class ExecutionRuntimeImpl implements ExecutionRuntime {
 
         let compilerOutput: unknown;
         try {
-          compilerOutput = await request.compile(structuredClone(runtime));
+          compilerOutput = await request.compile(
+            structuredClone(runtime),
+            structuredClone(preflight),
+          );
         } catch (cause) {
           throw runtimeError(
-            "preparation.compiler-error",
-            `Host compiler failed: ${errorMessage(cause)}`,
+            operation.controller.signal.aborted
+              ? "preparation.cancelled"
+              : "preparation.compiler-error",
+            operation.controller.signal.aborted
+              ? "Host compilation was cancelled."
+              : `Host compiler failed: ${errorMessage(cause)}`,
             [],
             cause,
           );
@@ -419,7 +457,6 @@ class ExecutionRuntimeImpl implements ExecutionRuntime {
       }
 
       const preparedRunId = this.#newId("prepared");
-      const effectiveTools = bindEffectiveTools(preflight, intent.requestedTools);
       const boundPreparation = bindPreparation(
         returnedPreparation,
         compiledRuntime,
@@ -1130,15 +1167,32 @@ function validateBackendImplementation(
   }
 }
 
-function createPreparationOperation(): PreparationOperation {
+function createPreparationOperation(
+  externalSignal?: AbortSignal,
+): PreparationOperation {
   let complete!: () => void;
   const completion = new Promise<void>((resolve) => {
     complete = resolve;
   });
+  const controller = new AbortController();
+  let completed = false;
+  const relayAbort = (): void => {
+    controller.abort(externalSignal?.reason);
+  };
+  if (externalSignal?.aborted) {
+    relayAbort();
+  } else {
+    externalSignal?.addEventListener("abort", relayAbort, { once: true });
+  }
   return {
-    controller: new AbortController(),
+    controller,
     completion,
-    complete,
+    complete: () => {
+      if (completed) return;
+      completed = true;
+      externalSignal?.removeEventListener("abort", relayAbort);
+      complete();
+    },
   };
 }
 

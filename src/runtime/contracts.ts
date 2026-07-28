@@ -24,7 +24,19 @@ export interface Disposable {
 export interface PrepareRequest {
   backendId: string;
   intent: ExecutionIntent;
-  compile(runtime: PromptRuntime): Promise<PreparedConversation>;
+  /**
+   * Cancels preflight and backend-assisted preparation. The signal is detached
+   * once preparation settles and does not control an already prepared run.
+   */
+  signal?: AbortSignal;
+  /**
+   * Receives the backend-supplied prompt runtime and the validated accepted
+   * preflight that authorized this exact compilation.
+   */
+  compile(
+    runtime: PromptRuntime,
+    preflight: BackendPreflightAccepted,
+  ): Promise<PreparedConversation>;
 }
 
 export interface PreparedRun {

@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
+import { getEventListeners } from "node:events";
 import test from "node:test";
 import {
   createExecutionRuntime,
   ExecutionRuntimeError,
+  type ExecutionBackend,
   type ExecutionRuntime,
   type PrepareRequest,
   type PreparedRun,
@@ -103,21 +105,32 @@ test("backend-assisted preparation seals an inspectable one-shot plan", async ()
   const runtime = deterministicRuntime();
   const backend = new DeterministicFakeBackend();
   runtime.registerBackend(backend);
+  const controller = new AbortController();
   let compilerCalls = 0;
   const prepared = await runtime.prepare(request(backend, {
-    compile: async (promptRuntime) => {
+    signal: controller.signal,
+    compile: async (promptRuntime, preflight) => {
       compilerCalls += 1;
       assert.equal(promptRuntime.fidelity, "backend-assisted");
+      assert.equal(preflight.status, "accepted");
+      assert.equal(preflight.backend.id, backend.descriptor.id);
+      assert.deepEqual(
+        preflight.toolCatalog.map(({ name }) => name),
+        ["echo", "read", "write", "shell", "web"],
+      );
+      preflight.preflightId = "caller-mutated";
       return fakePreparedConversation();
     },
   }));
 
   assert.equal(compilerCalls, 1);
   assert.equal(backend.compilerCalls, 1);
+  assert.equal(getEventListeners(controller.signal, "abort").length, 0);
   assert.match(prepared.conversationFingerprint, /^sha256:v1:/);
   assert.match(prepared.executionFingerprint, /^sha256:v1:/);
   const snapshot = prepared.snapshot();
   assert.equal(snapshot.backendId, backend.descriptor.id);
+  assert.equal(snapshot.preflightId, "preflight-1");
   assert.deepEqual(
     snapshot.effectiveTools.map(({ backendToolId }) => backendToolId),
     ["tool.read"],
@@ -135,6 +148,95 @@ test("backend-assisted preparation seals an inspectable one-shot plan", async ()
     TypeError,
   );
   await prepared.discard();
+  await runtime.dispose();
+});
+
+test("prepare rejects an already-aborted caller signal before preflight", async () => {
+  const runtime = deterministicRuntime();
+  const backend = new DeterministicFakeBackend();
+  runtime.registerBackend(backend);
+  const controller = new AbortController();
+  controller.abort("caller cancelled");
+
+  await assert.rejects(
+    () => runtime.prepare(request(backend, { signal: controller.signal })),
+    runtimeError("preflight.cancelled"),
+  );
+  assert.equal(backend.preflightCalls.length, 0);
+  assert.equal(getEventListeners(controller.signal, "abort").length, 0);
+  await runtime.dispose();
+});
+
+test("prepare relays caller abort during backend preflight and detaches it", async () => {
+  const runtime = deterministicRuntime();
+  const backend = new DeterministicFakeBackend();
+  let markPreflightStarted!: () => void;
+  const preflightStarted = new Promise<void>((resolve) => {
+    markPreflightStarted = resolve;
+  });
+  const cancellableBackend: ExecutionBackend = backend;
+  cancellableBackend.preflight = async (input) => {
+    markPreflightStarted();
+    await new Promise<void>((_resolve, reject) => {
+      if (input.signal.aborted) {
+        reject(new Error("Preflight observed abort."));
+        return;
+      }
+      input.signal.addEventListener(
+        "abort",
+        () => reject(new Error("Preflight observed abort.")),
+        { once: true },
+      );
+    });
+    throw new Error("unreachable");
+  };
+  runtime.registerBackend(cancellableBackend);
+  const controller = new AbortController();
+
+  const preparing = runtime.prepare(request(backend, {
+    signal: controller.signal,
+  }));
+  await preflightStarted;
+  assert.equal(getEventListeners(controller.signal, "abort").length, 1);
+  controller.abort("caller cancelled");
+  await assert.rejects(preparing, runtimeError("preflight.cancelled"));
+  assert.equal(getEventListeners(controller.signal, "abort").length, 0);
+  await runtime.dispose();
+});
+
+test("prepare relays caller abort during backend preparation and detaches it", async () => {
+  const runtime = deterministicRuntime();
+  const backend = new DeterministicFakeBackend();
+  let markPreparationStarted!: () => void;
+  const preparationStarted = new Promise<void>((resolve) => {
+    markPreparationStarted = resolve;
+  });
+  backend.prepare = async (_input, context) => {
+    markPreparationStarted();
+    await new Promise<void>((_resolve, reject) => {
+      if (context.signal.aborted) {
+        reject(new Error("Preparation observed abort."));
+        return;
+      }
+      context.signal.addEventListener(
+        "abort",
+        () => reject(new Error("Preparation observed abort.")),
+        { once: true },
+      );
+    });
+    throw new Error("unreachable");
+  };
+  runtime.registerBackend(backend);
+  const controller = new AbortController();
+
+  const preparing = runtime.prepare(request(backend, {
+    signal: controller.signal,
+  }));
+  await preparationStarted;
+  assert.equal(getEventListeners(controller.signal, "abort").length, 1);
+  controller.abort("caller cancelled");
+  await assert.rejects(preparing, runtimeError("preparation.cancelled"));
+  assert.equal(getEventListeners(controller.signal, "abort").length, 0);
   await runtime.dispose();
 });
 

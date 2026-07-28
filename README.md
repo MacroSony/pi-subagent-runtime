@@ -71,9 +71,11 @@ import { PiRpcBackend } from "@zihanw/pi-subagent-runtime/backends/rpc";
 
 const runtime = createExecutionRuntime();
 runtime.registerBackend(new PiRpcBackend());
+const preparationController = new AbortController();
 
 const prepared = await runtime.prepare({
   backendId: "pi-rpc",
+  signal: preparationController.signal,
   intent: {
     model: { provider: "example", id: "review-model" },
     requestedTools: ["read", "grep", "find", "ls"],
@@ -85,8 +87,11 @@ const prepared = await runtime.prepare({
     },
     limits: { timeoutMs: { value: 60_000, enforcement: "best-effort" } },
   },
-  compile: async (promptRuntime) => ({
-    systemPrompt: compileOwnedSystemPrompt(promptRuntime),
+  compile: async (promptRuntime, acceptedPreflight) => ({
+    systemPrompt: compileOwnedSystemPrompt({
+      promptRuntime,
+      toolCatalog: acceptedPreflight.toolCatalog,
+    }),
     messages: compileOwnedMessages(),
   }),
 });
@@ -100,11 +105,18 @@ The API is illustrative and will change during extraction. The important
 invariants are:
 
 - the host owns compilation;
+- the host compiler receives a cloned, validated accepted preflight;
 - the backend is selected explicitly;
 - the runtime computes and binds the execution fingerprint;
 - faithful materialization of the compiled conversation is a required backend
   invariant tested by the conformance suite;
 - unsupported guarantees are rejected before provider transport.
+
+The optional preparation signal covers preflight and backend-assisted
+preparation only. The runtime relays it to the backend, removes its listener
+when `prepare()` settles, and does not let a later abort control an already
+prepared run. Execution cancellation remains explicit through
+`RunHandle.cancel()`.
 
 The runtime can detect mutation of its sealed plan and inconsistent receipts.
 It cannot prove that a malicious backend sent the same content to a provider,
