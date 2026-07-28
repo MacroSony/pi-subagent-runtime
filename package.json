@@ -1,6 +1,6 @@
 {
   "name": "@zihanw/pi-subagent-runtime",
-  "version": "0.0.0",
+  "version": "0.1.0-beta.1",
   "description": "Execution kernel for caller-compiled Pi agents with explicit backend negotiation, sealed plans, and lifecycle control.",
   "type": "module",
   "license": "MIT",
