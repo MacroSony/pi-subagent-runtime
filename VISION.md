@@ -152,8 +152,8 @@ runs as needed.
 
 ## Package architecture
 
-The pre-alpha can remain one repository and npm package with isolated entry
-points:
+The initial prerelease remains one repository and npm package with isolated
+entry points:
 
 ```text
 @zihanw/pi-subagent-runtime

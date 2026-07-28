@@ -2,8 +2,7 @@
 
 > A pure execution kernel for caller-prepared Pi agents.
 
-**Status:** Pre-alpha. The contract and first reference backends are being
-extracted from Pi Forge. The package is not yet published.
+**Status:** Experimental prerelease. The API may change before v0.1.0.
 
 Pi Subagent Runtime lets another extension or application execute an exact,
 caller-compiled Pi conversation through an explicitly selected backend.
@@ -60,7 +59,19 @@ implementations.
 
 Hosts and separately versioned backends may provide those features.
 
-## API direction
+## Installation
+
+Install the current prerelease by its exact version in production integrations:
+
+```sh
+npm install @zihanw/pi-subagent-runtime@0.1.0-beta.1
+```
+
+The portable `core`, `runtime`, and `testing` entry points contain no Pi SDK
+imports. The process-backend entry points use the compatible optional Pi peer
+dependencies supplied by their host.
+
+## API overview
 
 Preparation is two-phase because some exact Pi prompt inputs are available only
 inside the backend's prompt lifecycle:
@@ -101,8 +112,8 @@ const run = runtime.execute(prepared);
 const result = await run.result;
 ```
 
-The API is illustrative and will change during extraction. The important
-invariants are:
+The API is experimental and may change before v0.1.0. Its important invariants
+are:
 
 - the host owns compilation;
 - the host compiler receives a cloned, validated accepted preflight;
@@ -167,7 +178,7 @@ v0.1 completion criteria.
 
 ## Relationship to Pi Forge
 
-The runtime is being extracted from the experimental subagent adapter in
+The runtime was extracted from the experimental subagent adapter in
 [`@zihanw/pi-forge`](https://github.com/MacroSony/pi-forge).
 
 Pi Forge remains responsible for profiles, prompt stacks, trusted compiler

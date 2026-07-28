@@ -1,9 +1,29 @@
 {
   "name": "@zihanw/pi-subagent-runtime",
   "version": "0.0.0",
-  "description": "Pure execution kernel for caller-prepared Pi agents.",
-  "private": true,
+  "description": "Execution kernel for caller-compiled Pi agents with explicit backend negotiation, sealed plans, and lifecycle control.",
   "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/MacroSony/pi-subagent-runtime.git"
+  },
+  "homepage": "https://github.com/MacroSony/pi-subagent-runtime#readme",
+  "bugs": {
+    "url": "https://github.com/MacroSony/pi-subagent-runtime/issues"
+  },
+  "keywords": [
+    "pi",
+    "subagent",
+    "agent-runtime",
+    "ai-agents",
+    "execution-runtime"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/",
+    "tag": "beta"
+  },
   "engines": {
     "node": ">=22.19.0"
   },
@@ -41,11 +61,14 @@
   },
   "files": [
     "dist/",
+    "examples/independent-host/",
     "README.md",
     "VISION.md",
     "LICENSE*"
   ],
   "scripts": {
+    "prepack": "npm run build",
+    "prepublishOnly": "npm run verify",
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
     "test": "npm run build && node --test --test-concurrency=1 \"tests/*.test.ts\"",
