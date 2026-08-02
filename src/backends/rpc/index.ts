@@ -13,5 +13,8 @@ export {
   type PiRpcRecord,
   type PiRpcResponse,
 } from "./rpc-client.ts";
-export { modelRuntimeFromRegistry } from "../shared/pi-model-runtime.ts";
+export {
+  modelRuntimeFromRegistry,
+  type PiModelRegistry,
+} from "../shared/pi-model-runtime.ts";
 export { READ_ONLY_PI_TOOL_CATALOG as PI_READ_ONLY_TOOL_CATALOG } from "../shared/process-report.ts";

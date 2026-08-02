@@ -20,11 +20,29 @@ import {
 } from "../src/backends/subprocess/pi-subprocess-backend.ts";
 import { createSubprocessBridge } from "../src/backends/subprocess/subprocess-bridge.ts";
 import { MAX_SUBPROCESS_REPORT_STRING_BYTES } from "../src/backends/subprocess/subprocess-report.ts";
+import { modelRuntimeFromRegistry } from "../src/backends/shared/pi-model-runtime.ts";
 import { runBackendConformance } from "../src/testing/index.ts";
 
 const PROVIDER = "pi-subagent-runtime-subprocess-fixture";
 const MODEL_ID = "fixture-model";
 const API = "pi-subagent-runtime-subprocess-api";
+
+test("process backends resolve host model runtimes by capability", async () => {
+  const { modelRegistry, modelRuntime } = await createFixturePiRuntime({
+    provider: PROVIDER,
+    api: API,
+    modelId: MODEL_ID,
+  });
+  try {
+    assert.equal(modelRuntimeFromRegistry(modelRegistry), modelRuntime);
+    assert.throws(
+      () => modelRuntimeFromRegistry({} as Parameters<typeof modelRuntimeFromRegistry>[0]),
+      /compatible authenticated ModelRuntime/,
+    );
+  } finally {
+    modelRegistry.unregisterProvider(PROVIDER);
+  }
+});
 
 test("subprocess backend prepares through the parent model runtime, executes a fresh child, and retains a sanitized report", async () => {
   const tempDirectoriesBefore = subprocessTempDirectories();

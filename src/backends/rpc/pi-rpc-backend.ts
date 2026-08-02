@@ -6,7 +6,7 @@ import { basename, dirname, join } from "node:path";
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import type { Readable } from "node:stream";
-import type { ModelRegistry, ModelRuntime } from "@earendil-works/pi-coding-agent";
+import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import {
   canonicalJson,
   type BackendDescriptor,
@@ -37,6 +37,7 @@ import {
   acceptedReadOnlyPreflight,
   evaluateProcessIntent,
 } from "../shared/preflight-policy.ts";
+import type { PiModelRegistry } from "../shared/pi-model-runtime.ts";
 import {
   MAX_PROCESS_STDERR_BYTES,
   appendBounded,
@@ -97,7 +98,7 @@ interface PiInvocation {
 }
 
 export interface PiRpcBackendOptions {
-  modelRegistry: ModelRegistry;
+  modelRegistry: PiModelRegistry;
   modelRuntime?: ModelRuntime;
   cwd: string;
   now?: () => Date;
@@ -124,7 +125,7 @@ export class PiRpcBackend implements ExecutionBackend {
     PI_RPC_READONLY_BACKEND_DESCRIPTOR,
   );
   readonly #preparations: SdkPreparationGate;
-  readonly #modelRegistry: ModelRegistry;
+  readonly #modelRegistry: PiModelRegistry;
   readonly #cwd: string;
   readonly #now: () => Date;
   readonly #idFactory: () => string;

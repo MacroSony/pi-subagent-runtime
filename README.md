@@ -64,12 +64,17 @@ Hosts and separately versioned backends may provide those features.
 Install the current prerelease by its exact version in production integrations:
 
 ```sh
-npm install @zihanw/pi-subagent-runtime@0.1.0-beta.1
+npm install @zihanw/pi-subagent-runtime@0.1.0-beta.2
 ```
 
 The portable `core`, `runtime`, and `testing` entry points contain no Pi SDK
-imports. The process-backend entry points use the compatible optional Pi peer
-dependencies supplied by their host.
+imports. Pi core packages are wildcard optional peers: the process-backend
+entry points use the modules supplied by the running Pi host instead of
+installing a private, version-pinned copy. Exact Pi versions remain development
+fixtures for reproducible verification, while backend startup checks the
+runtime capabilities needed for authenticated exact preparation. Backend
+options accept a minimal structural model-registry surface, so linked hosts are
+not type-branded by the runtime's development Pi version.
 
 ## API overview
 

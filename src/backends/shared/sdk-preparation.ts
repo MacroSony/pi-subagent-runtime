@@ -11,7 +11,6 @@ import {
   type BuildSystemPromptOptions,
   type ExtensionAPI,
   type ExtensionFactory,
-  type ModelRegistry,
   type ModelRuntime,
 } from "@earendil-works/pi-coding-agent";
 import {
@@ -26,7 +25,10 @@ import type {
   BackendPreparation,
   BackendPreparationContext,
 } from "../../runtime/index.ts";
-import { modelRuntimeFromRegistry } from "./pi-model-runtime.ts";
+import {
+  modelRuntimeFromRegistry,
+  type PiModelRegistry,
+} from "./pi-model-runtime.ts";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 
 /**
@@ -49,7 +51,7 @@ export interface PrimedPreparation {
 }
 
 export interface SdkPreparationGateOptions {
-  modelRegistry: ModelRegistry;
+  modelRegistry: PiModelRegistry;
   modelRuntime?: ModelRuntime;
   cwd: string;
   now?: () => Date;
@@ -64,7 +66,7 @@ export interface SdkPreparationGateOptions {
  * backend entry points that compose this component.
  */
 export class SdkPreparationGate {
-  readonly #modelRegistry: ModelRegistry;
+  readonly #modelRegistry: PiModelRegistry;
   readonly #modelRuntime: ModelRuntime;
   readonly #cwd: string;
   readonly #now: () => Date;

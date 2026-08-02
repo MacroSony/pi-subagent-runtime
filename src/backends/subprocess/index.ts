@@ -7,7 +7,10 @@ export {
   type PiSubprocessRunReport,
   type PiSubprocessUsage,
 } from "./pi-subprocess-backend.ts";
-export { modelRuntimeFromRegistry } from "./pi-model-runtime.ts";
+export {
+  modelRuntimeFromRegistry,
+  type PiModelRegistry,
+} from "./pi-model-runtime.ts";
 export { READ_ONLY_PI_TOOL_CATALOG as PI_READ_ONLY_TOOL_CATALOG } from "../shared/process-report.ts";
 export {
   createSubprocessBridge,

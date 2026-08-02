@@ -165,9 +165,11 @@ entry points:
 ```
 
 `core`, `runtime`, and `testing` must contain no Pi SDK imports. Pi dependencies
-are optional peers used only by backend entry points. Backends may be split
-into separately versioned packages later if Pi compatibility creates release
-pressure.
+are wildcard optional peers used only by backend entry points, so a Pi extension
+resolves the host's bundled modules rather than installing a stale private copy.
+Exact versions belong in development fixtures and compatibility verification,
+not the published host constraint. Backends may be split into separately
+versioned packages later if Pi compatibility creates release pressure.
 
 The initial process adapters share an adapter-private, Pi-SDK-backed
 preparation component. That component owns the temporary `AgentSession`,

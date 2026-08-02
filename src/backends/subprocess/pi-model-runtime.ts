@@ -1,1 +1,4 @@
-export { modelRuntimeFromRegistry } from "../shared/pi-model-runtime.ts";
+export {
+  modelRuntimeFromRegistry,
+  type PiModelRegistry,
+} from "../shared/pi-model-runtime.ts";

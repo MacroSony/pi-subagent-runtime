@@ -6,7 +6,7 @@ import { basename, dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import type { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
-import type { ModelRegistry, ModelRuntime } from "@earendil-works/pi-coding-agent";
+import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import {
   canonicalJson,
   type BackendDescriptor,
@@ -37,6 +37,7 @@ import {
   acceptedReadOnlyPreflight,
   evaluateProcessIntent,
 } from "../shared/preflight-policy.ts";
+import type { PiModelRegistry } from "../shared/pi-model-runtime.ts";
 import {
   MAX_PROCESS_STDERR_BYTES,
   MAX_RETAINED_PROCESS_REPORT_BYTES,
@@ -105,7 +106,7 @@ interface ActiveSubprocessRun {
 }
 
 export interface PiSubprocessBackendOptions {
-  modelRegistry: ModelRegistry;
+  modelRegistry: PiModelRegistry;
   modelRuntime?: ModelRuntime;
   cwd: string;
   now?: () => Date;
@@ -133,7 +134,7 @@ export class PiSubprocessBackend implements ExecutionBackend {
   readonly #invocationFactory: (piArgs: string[]) => PiInvocation;
   readonly #bridgePath: string;
   readonly #env?: Readonly<Record<string, string>>;
-  readonly #modelRegistry: ModelRegistry;
+  readonly #modelRegistry: PiModelRegistry;
   readonly #active = new Map<string, ActiveSubprocessRun>();
   readonly #reports = new Map<string, PiSubprocessRunReport>();
 

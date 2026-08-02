@@ -3,7 +3,6 @@ import {
   type Model,
   type ThinkingLevel,
 } from "@earendil-works/pi-ai";
-import type { ModelRegistry } from "@earendil-works/pi-coding-agent";
 import type {
   BackendDescriptor,
   BackendPreflightAccepted,
@@ -14,6 +13,7 @@ import {
   READ_ONLY_PI_TOOL_CATALOG,
   SHARED_USER_ACCESS_CAPABILITIES,
 } from "./process-report.ts";
+import type { PiModelRegistry } from "./pi-model-runtime.ts";
 
 export const VALID_PI_THINKING_LEVELS = new Set([
   "minimal",
@@ -36,7 +36,7 @@ export interface ProcessPreflightEvaluation {
  */
 export function evaluateProcessIntent(
   intent: ExecutionIntent,
-  modelRegistry: ModelRegistry,
+  modelRegistry: PiModelRegistry,
   codePrefix: string,
 ): ProcessPreflightEvaluation {
   const diagnostics: Diagnostic[] = [];
