@@ -57,12 +57,18 @@
       "types": "./dist/backends/rpc/index.d.ts",
       "import": "./dist/backends/rpc/index.js",
       "default": "./dist/backends/rpc/index.js"
+    },
+    "./backends/bubblewrap": {
+      "types": "./dist/backends/bubblewrap/index.d.ts",
+      "import": "./dist/backends/bubblewrap/index.js",
+      "default": "./dist/backends/bubblewrap/index.js"
     }
   },
   "files": [
     "dist/",
     "examples/independent-host/",
     "README.md",
+    "architecture.md",
     "CHANGELOG.md",
     "VISION.md",
     "LICENSE*"

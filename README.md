@@ -41,6 +41,7 @@ The project targets a narrower gap than a general subagent package:
 - inspectable prepared plans for host-owned approval;
 - evented run handles, cancellation, cleanup, and terminal results;
 - enforcement receipts that distinguish tool policy from OS isolation;
+- an experimental Bubblewrap proposal writer with reviewable change sets;
 - reusable backend conformance tests.
 
 An enforcement receipt is a backend attestation. The runtime validates
@@ -54,7 +55,7 @@ implementations.
 - task-to-prompt construction or context inheritance;
 - model routing or backend fallback;
 - batch queues, background jobs, workflows, retries, or scheduling;
-- worktree, sandbox, container, or remote policy;
+- broad worktree, container, or remote policy;
 - approval UI, viewers, persistence, or product-specific artifacts.
 
 Hosts and separately versioned backends may provide those features.
@@ -138,7 +139,7 @@ The runtime can detect mutation of its sealed plan and inconsistent receipts.
 It cannot prove that a malicious backend sent the same content to a provider,
 so backend trust remains explicit.
 
-## First backends
+## Built-in backends
 
 The first backend, available at
 `@zihanw/pi-subagent-runtime/backends/subprocess`, adapts Pi Forge's hybrid
@@ -164,6 +165,36 @@ Both initial process backends report a shared-user boundary unless a separate
 sandbox implementation launches the entire process under stronger
 enforcement.
 
+## Bubblewrap proposal writer
+
+On Linux with a verified `bwrap` binary, the experimental
+`@zihanw/pi-subagent-runtime/backends/bubblewrap` entry point provides
+`pi-bwrap-propose-write`. It accepts exactly one writable workspace at its
+root, runs Pi plus `bash` in Bubblewrap, and mounts a private copy of that
+workspace instead of the original. This lets a writer edit files and run tests
+without changing the host workspace during the agent run.
+
+After a collectable terminal run, `result.workspaceChanges` holds the
+path-sorted, bounded diff/manifest and the opaque proposal reference. The
+host can either pass that reference in a fresh intent’s `workspaceProposal`
+field for another review/fix turn, discard it, or explicitly apply it through
+the same `PiBubblewrapBackend` instance:
+
+```ts
+if (result.status === "completed") {
+  const changeSet = result.workspaceChanges?.[0];
+  if (changeSet && approve(changeSet, result.output.text)) {
+    const applied = await bubblewrapBackend.applyProposal(changeSet);
+    // Handle applied, conflicted, busy, unavailable, or failed explicitly.
+  }
+}
+```
+
+`conflicted` means the original or retained proposal changed before apply and
+no apply write was made. Apply is deliberately check-then-apply rather than a
+filesystem transaction: hosts must serialize other source-workspace writers,
+and a non-conflict `failed` result may be partially applied.
+
 ## Host independence
 
 The runtime works from its published package surface alone.
@@ -177,9 +208,10 @@ available), so it cannot drift from the shipped API.
 
 ## Architecture and implementation plan
 
-See [VISION.md](./VISION.md) for ownership boundaries, contract direction,
-backend semantics, safety terminology, the first implementation sequence, and
-v0.1 completion criteria.
+See [architecture.md](./architecture.md) for the maintained package map,
+execution flow, and planned backend architecture. [VISION.md](./VISION.md)
+records ownership boundaries, contract direction, backend semantics, safety
+terminology, the first implementation sequence, and v0.1 completion criteria.
 
 ## Relationship to Pi Forge
 

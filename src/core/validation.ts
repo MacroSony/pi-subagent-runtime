@@ -82,6 +82,15 @@ export function validateExecutionIntent(value: unknown): Diagnostic[] {
   diagnostics.push(...validateAccessRequest(value.access, "access"));
   diagnostics.push(...validateLimitRequest(value.limits, "limits"));
 
+  if (value.workspaceProposal !== undefined) {
+    validateWorkspaceProposalReference(
+      value.workspaceProposal,
+      value.access,
+      "workspaceProposal",
+      diagnostics,
+    );
+  }
+
   if (value.media !== undefined) {
     if (!Array.isArray(value.media)) {
       diagnostics.push(
@@ -311,6 +320,44 @@ export function validateAccessRequest(
   }
 
   return diagnostics;
+}
+
+function validateWorkspaceProposalReference(
+  value: unknown,
+  access: unknown,
+  path: string,
+  diagnostics: Diagnostic[],
+  codePrefix = "intent",
+): void {
+  if (!isRecord(value)) {
+    diagnostics.push(
+      error(
+        `${codePrefix}.workspace-proposal`,
+        "workspaceProposal must be an object.",
+        path,
+      ),
+    );
+    return;
+  }
+  validateOpaqueId(value.id, `${path}.id`, diagnostics);
+  validateOpaqueId(value.workspaceHandle, `${path}.workspaceHandle`, diagnostics);
+  if (
+    isRecord(access) &&
+    Array.isArray(access.workspaces) &&
+    typeof value.workspaceHandle === "string" &&
+    !access.workspaces.some(
+      (workspace) =>
+        isRecord(workspace) && workspace.handle === value.workspaceHandle,
+    )
+  ) {
+    diagnostics.push(
+      error(
+        `${codePrefix}.workspace-proposal-workspace`,
+        "workspaceProposal must reference a requested workspace handle.",
+        `${path}.workspaceHandle`,
+      ),
+    );
+  }
 }
 
 export function validateLimitRequest(
@@ -1301,6 +1348,13 @@ export function validateRunResult(
   if (value.usage !== undefined) {
     validateUsage(value.usage, "usage", diagnostics);
   }
+  if (value.workspaceChanges !== undefined) {
+    validateWorkspaceChangeSets(
+      value.workspaceChanges,
+      "workspaceChanges",
+      diagnostics,
+    );
+  }
 
   switch (value.status) {
     case "completed":
@@ -1440,9 +1494,356 @@ export function validateRunResult(
         ),
       );
     }
+    if (Array.isArray(value.workspaceChanges)) {
+      const writableHandles = new Set(
+        plan.intent.access.workspaces
+          .filter((workspace) => workspace.mode === "read-write")
+          .map((workspace) => workspace.handle),
+      );
+      for (const [index, changeSet] of value.workspaceChanges.entries()) {
+        if (
+          isRecord(changeSet) &&
+          isRecord(changeSet.proposal) &&
+          !writableHandles.has(String(changeSet.proposal.workspaceHandle))
+        ) {
+          diagnostics.push(
+            error(
+              "result.workspace-change-binding",
+              "Workspace changes must belong to a read-write workspace from the sealed plan.",
+              `workspaceChanges[${index}].proposal.workspaceHandle`,
+            ),
+          );
+        }
+      }
+    }
   }
 
   return diagnostics;
+}
+
+function validateWorkspaceChangeSets(
+  value: unknown,
+  path: string,
+  diagnostics: Diagnostic[],
+): void {
+  if (!Array.isArray(value) || value.length === 0) {
+    diagnostics.push(
+      error(
+        "result.workspace-changes",
+        "workspaceChanges must be a non-empty array when supplied.",
+        path,
+      ),
+    );
+    return;
+  }
+  const proposalIds = new Set<string>();
+  for (const [index, changeSet] of value.entries()) {
+    const itemPath = `${path}[${index}]`;
+    validateWorkspaceChangeSet(changeSet, itemPath, diagnostics);
+    if (
+      isRecord(changeSet) &&
+      isRecord(changeSet.proposal) &&
+      typeof changeSet.proposal.id === "string"
+    ) {
+      if (proposalIds.has(changeSet.proposal.id)) {
+        diagnostics.push(
+          error(
+            "result.workspace-change-duplicate",
+            "workspaceChanges must not repeat a proposal id.",
+            `${itemPath}.proposal.id`,
+          ),
+        );
+      }
+      proposalIds.add(changeSet.proposal.id);
+    }
+  }
+}
+
+function validateWorkspaceChangeSet(
+  value: unknown,
+  path: string,
+  diagnostics: Diagnostic[],
+): void {
+  if (!isRecord(value)) {
+    diagnostics.push(
+      error("result.workspace-change", "Workspace change set must be an object.", path),
+    );
+    return;
+  }
+  validateWorkspaceProposalReference(
+    value.proposal,
+    undefined,
+    `${path}.proposal`,
+    diagnostics,
+    "result",
+  );
+  validateFingerprint(value.baseTreeFingerprint, `${path}.baseTreeFingerprint`, diagnostics);
+  validateFingerprint(
+    value.proposalTreeFingerprint,
+    `${path}.proposalTreeFingerprint`,
+    diagnostics,
+  );
+  if (!isNonNegativeInteger(value.totalDiffBytes)) {
+    diagnostics.push(
+      error(
+        "result.workspace-change-diff-bytes",
+        "totalDiffBytes must be a non-negative integer.",
+        `${path}.totalDiffBytes`,
+      ),
+    );
+  }
+  if (!Array.isArray(value.changes)) {
+    diagnostics.push(
+      error(
+        "result.workspace-change-list",
+        "changes must be an array.",
+        `${path}.changes`,
+      ),
+    );
+    return;
+  }
+  let previousPath: string | undefined;
+  let diffBytes = 0;
+  for (const [index, change] of value.changes.entries()) {
+    const changePath = `${path}.changes[${index}]`;
+    validateWorkspaceChange(change, changePath, diagnostics);
+    if (isRecord(change) && typeof change.path === "string") {
+      if (
+        previousPath !== undefined &&
+        change.path <= previousPath
+      ) {
+        diagnostics.push(
+          error(
+            "result.workspace-change-order",
+            "changes must be strictly path-sorted with no duplicates.",
+            `${changePath}.path`,
+          ),
+        );
+      }
+      previousPath = change.path;
+    }
+    if (isRecord(change) && typeof change.diff === "string") {
+      diffBytes += Buffer.byteLength(change.diff, "utf8");
+    }
+  }
+  if (isNonNegativeInteger(value.totalDiffBytes) && diffBytes !== value.totalDiffBytes) {
+    diagnostics.push(
+      error(
+        "result.workspace-change-diff-total",
+        "totalDiffBytes must equal the UTF-8 byte length of supplied diffs.",
+        `${path}.totalDiffBytes`,
+      ),
+    );
+  }
+}
+
+function validateWorkspaceChange(
+  value: unknown,
+  path: string,
+  diagnostics: Diagnostic[],
+): void {
+  if (!isRecord(value)) {
+    diagnostics.push(error("result.workspace-change-entry", "Change must be an object.", path));
+    return;
+  }
+  if (!isSafeRelativePath(value.path)) {
+    diagnostics.push(
+      error(
+        "result.workspace-change-path",
+        "Change path must be a safe non-empty relative path.",
+        `${path}.path`,
+      ),
+    );
+  }
+  if (
+    ![
+      "added",
+      "modified",
+      "deleted",
+      "type-changed",
+      "mode-changed",
+      "symlink-changed",
+    ].includes(String(value.kind))
+  ) {
+    diagnostics.push(
+      error("result.workspace-change-kind", "Unsupported workspace change kind.", `${path}.kind`),
+    );
+  }
+  if (![
+    "available",
+    "binary",
+    "too-large",
+    "truncated",
+    "unavailable",
+  ].includes(String(value.diffStatus))) {
+    diagnostics.push(
+      error("result.workspace-change-diff-status", "Unsupported diff status.", `${path}.diffStatus`),
+    );
+  }
+  if (value.diff !== undefined) {
+    if (typeof value.diff !== "string") {
+      diagnostics.push(
+        error("result.workspace-change-diff", "diff must be a string.", `${path}.diff`),
+      );
+    } else if (value.diffStatus !== "available") {
+      diagnostics.push(
+        error(
+          "result.workspace-change-diff-status",
+          "A diff can be supplied only when diffStatus is available.",
+          `${path}.diffStatus`,
+        ),
+      );
+    }
+  }
+  if (value.before !== undefined) {
+    validateWorkspaceEntryState(value.before, `${path}.before`, diagnostics);
+    if (isRecord(value.before) && value.before.path !== value.path) {
+      diagnostics.push(
+        error(
+          "result.workspace-change-entry-path",
+          "before.path must equal the containing change path.",
+          `${path}.before.path`,
+        ),
+      );
+    }
+  }
+  if (value.after !== undefined) {
+    validateWorkspaceEntryState(value.after, `${path}.after`, diagnostics);
+    if (isRecord(value.after) && value.after.path !== value.path) {
+      diagnostics.push(
+        error(
+          "result.workspace-change-entry-path",
+          "after.path must equal the containing change path.",
+          `${path}.after.path`,
+        ),
+      );
+    }
+  }
+  if (value.kind === "added" && (value.before !== undefined || value.after === undefined)) {
+    diagnostics.push(
+      error("result.workspace-change-transition", "Added entries require only an after state.", path),
+    );
+  }
+  if (value.kind === "deleted" && (value.before === undefined || value.after !== undefined)) {
+    diagnostics.push(
+      error("result.workspace-change-transition", "Deleted entries require only a before state.", path),
+    );
+  }
+  if (
+    ["modified", "type-changed", "mode-changed", "symlink-changed"].includes(
+      String(value.kind),
+    ) &&
+    (value.before === undefined || value.after === undefined)
+  ) {
+    diagnostics.push(
+      error(
+        "result.workspace-change-transition",
+        "Changed entries require both before and after states.",
+        path,
+      ),
+    );
+  }
+  if (
+    value.kind === "type-changed" &&
+    isRecord(value.before) &&
+    isRecord(value.after) &&
+    value.before.kind === value.after.kind
+  ) {
+    diagnostics.push(
+      error(
+        "result.workspace-change-transition",
+        "type-changed entries must have different entry kinds.",
+        path,
+      ),
+    );
+  }
+  if (
+    value.kind === "symlink-changed" &&
+    isRecord(value.before) &&
+    isRecord(value.after) &&
+    (value.before.kind !== "symlink" || value.after.kind !== "symlink")
+  ) {
+    diagnostics.push(
+      error(
+        "result.workspace-change-transition",
+        "symlink-changed entries must have symlink states.",
+        path,
+      ),
+    );
+  }
+  if (
+    value.kind === "mode-changed" &&
+    isRecord(value.before) &&
+    isRecord(value.after) &&
+    value.before.kind !== value.after.kind
+  ) {
+    diagnostics.push(
+      error(
+        "result.workspace-change-transition",
+        "mode-changed entries must preserve their entry kind.",
+        path,
+      ),
+    );
+  }
+}
+
+function validateWorkspaceEntryState(
+  value: unknown,
+  path: string,
+  diagnostics: Diagnostic[],
+): void {
+  if (!isRecord(value)) {
+    diagnostics.push(error("result.workspace-entry", "Entry state must be an object.", path));
+    return;
+  }
+  if (!isSafeRelativePath(value.path)) {
+    diagnostics.push(
+      error("result.workspace-entry-path", "Entry path must be a safe relative path.", `${path}.path`),
+    );
+  }
+  if (!["file", "directory", "symlink"].includes(String(value.kind))) {
+    diagnostics.push(
+      error("result.workspace-entry-kind", "Unsupported workspace entry kind.", `${path}.kind`),
+    );
+    return;
+  }
+  if (!isNonNegativeInteger(value.mode) || value.mode > 0o7777) {
+    diagnostics.push(
+      error("result.workspace-entry-mode", "mode must be an integer between 0 and 0o7777.", `${path}.mode`),
+    );
+  }
+  if (value.kind === "file") {
+    if (!isNonNegativeInteger(value.size)) {
+      diagnostics.push(
+        error("result.workspace-entry-size", "File entries require a non-negative integer size.", `${path}.size`),
+      );
+    }
+    validateFingerprint(value.digest, `${path}.digest`, diagnostics);
+    if (value.target !== undefined) {
+      diagnostics.push(
+        error("result.workspace-entry-target", "File entries cannot have a symlink target.", `${path}.target`),
+      );
+    }
+  } else if (value.kind === "symlink") {
+    if (typeof value.target !== "string" || value.target.includes("\0")) {
+      diagnostics.push(
+        error("result.workspace-entry-target", "Symlink entries require a target without NUL bytes.", `${path}.target`),
+      );
+    }
+    if (value.size !== undefined || value.digest !== undefined) {
+      diagnostics.push(
+        error("result.workspace-entry-content", "Symlink entries cannot have file content metadata.", path),
+      );
+    }
+  } else if (
+    value.size !== undefined ||
+    value.digest !== undefined ||
+    value.target !== undefined
+  ) {
+    diagnostics.push(
+      error("result.workspace-entry-content", "Directory entries cannot have file or symlink metadata.", path),
+    );
+  }
 }
 
 export function hasErrors(diagnostics: readonly Diagnostic[]): boolean {

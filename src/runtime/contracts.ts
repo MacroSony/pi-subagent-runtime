@@ -15,6 +15,7 @@ import type {
   RunSnapshot,
   RunUsage,
   SealedPlanSnapshot,
+  WorkspaceChangeSet,
 } from "../core/index.ts";
 
 export interface Disposable {
@@ -106,6 +107,7 @@ export interface BackendExecutionContext {
 interface BackendResultCommon {
   enforcement: EnforcementReceipt;
   usage?: RunUsage;
+  workspaceChanges?: readonly WorkspaceChangeSet[];
 }
 
 export interface BackendResultCompleted extends BackendResultCommon {

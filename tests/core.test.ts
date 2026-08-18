@@ -26,6 +26,7 @@ import {
   type PromptRuntime,
   type RunResult,
   type SealedPlanSnapshot,
+  type WorkspaceChangeSet,
 } from "../src/core/index.ts";
 
 const TEST_DIRECTORY = dirname(fileURLToPath(import.meta.url));
@@ -293,6 +294,24 @@ test("execution-intent validation rejects contradictory access and duplicate too
   assert.ok(codes.includes("limits.unknown"));
 });
 
+test("execution intent validates retained proposal references", () => {
+  assert.deepEqual(
+    validateExecutionIntent(
+      intent({
+        workspaceProposal: { id: "proposal:1", workspaceHandle: "workspace" },
+      }),
+    ),
+    [],
+  );
+  const invalid = validateExecutionIntent(
+    intent({
+      workspaceProposal: { id: "", workspaceHandle: "missing" },
+    }),
+  ).map(({ code }) => code);
+  assert.ok(invalid.includes("id.invalid"));
+  assert.ok(invalid.includes("intent.workspace-proposal-workspace"));
+});
+
 test("backend descriptors fail closed on inconsistent capabilities", () => {
   assert.deepEqual(validateBackendDescriptor(descriptor()), []);
 
@@ -465,6 +484,55 @@ test("terminal results validate structure and plan binding", () => {
       ({ code }) => code === "result.execution-binding",
     ),
   );
+});
+
+test("terminal results validate bounded proposal workspace change sets", () => {
+  const diff = "--- a/review.txt\n+++ b/review.txt\n@@ -1 +1 @@\n-before\n+after\n";
+  const changeSet: WorkspaceChangeSet = {
+    proposal: { id: "proposal:1", workspaceHandle: "workspace" },
+    baseTreeFingerprint: fingerprint("base-tree"),
+    proposalTreeFingerprint: fingerprint("proposal-tree"),
+    changes: [
+      {
+        path: "review.txt",
+        kind: "modified",
+        before: {
+          path: "review.txt",
+          kind: "file",
+          mode: 0o644,
+          size: 7,
+          digest: fingerprint("before\n"),
+        },
+        after: {
+          path: "review.txt",
+          kind: "file",
+          mode: 0o644,
+          size: 6,
+          digest: fingerprint("after\n"),
+        },
+        diffStatus: "available",
+        diff,
+      },
+    ],
+    totalDiffBytes: Buffer.byteLength(diff, "utf8"),
+  };
+  assert.deepEqual(
+    validateRunResult({ ...result(), workspaceChanges: [changeSet] }),
+    [],
+  );
+
+  const malformed = validateRunResult({
+    ...result(),
+    workspaceChanges: [
+      {
+        ...changeSet,
+        totalDiffBytes: 0,
+        changes: [{ ...changeSet.changes[0]!, path: "../escape" }],
+      },
+    ],
+  }).map(({ code }) => code);
+  assert.ok(malformed.includes("result.workspace-change-path"));
+  assert.ok(malformed.includes("result.workspace-change-diff-total"));
 });
 
 test("public validators report malformed values instead of throwing", () => {

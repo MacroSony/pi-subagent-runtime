@@ -53,6 +53,64 @@ export interface AccessRequest {
   allowProcess?: boolean;
 }
 
+/**
+ * Opaque reference to a backend-owned proposal workspace retained from an
+ * earlier run. The host supplies it only to request a fresh revision turn or
+ * a backend-specific guarded apply; the backend resolves it to a host path.
+ */
+export interface WorkspaceProposalReference {
+  id: string;
+  workspaceHandle: string;
+}
+
+/** Filesystem entry state used as evidence in a proposal change set. */
+export interface WorkspaceEntryState {
+  path: string;
+  kind: "file" | "directory" | "symlink";
+  mode: number;
+  size?: number;
+  digest?: Fingerprint;
+  target?: string;
+}
+
+export type WorkspaceChangeKind =
+  | "added"
+  | "modified"
+  | "deleted"
+  | "type-changed"
+  | "mode-changed"
+  | "symlink-changed";
+
+export type WorkspaceDiffStatus =
+  | "available"
+  | "binary"
+  | "too-large"
+  | "truncated"
+  | "unavailable";
+
+/** One path-level transition in an authoritative proposal workspace diff. */
+export interface WorkspaceChange {
+  path: string;
+  kind: WorkspaceChangeKind;
+  before?: WorkspaceEntryState;
+  after?: WorkspaceEntryState;
+  diffStatus: WorkspaceDiffStatus;
+  diff?: string;
+}
+
+/**
+ * Bounded, deterministic evidence for a backend-owned proposal workspace.
+ * The proposal reference is opaque and backend-local; hosts pass it back only
+ * to that backend for a revision, guarded apply, or discard.
+ */
+export interface WorkspaceChangeSet {
+  proposal: WorkspaceProposalReference;
+  baseTreeFingerprint: Fingerprint;
+  proposalTreeFingerprint: Fingerprint;
+  changes: readonly WorkspaceChange[];
+  totalDiffBytes: number;
+}
+
 export interface AccessCapabilities {
   readOnlyMountIsolation: boolean;
   readWriteMountIsolation: boolean;
@@ -200,6 +258,7 @@ export interface ExecutionIntent {
   access: AccessRequest;
   limits: LimitRequest;
   media?: readonly MediaReference[];
+  workspaceProposal?: WorkspaceProposalReference;
   provenance?: Readonly<Record<string, string>>;
 }
 
@@ -288,6 +347,8 @@ interface RunResultCommon {
   enforcement: EnforcementReceipt;
   durationMs: number;
   usage?: RunUsage;
+  /** Authoritative proposed workspace changes, if this backend supports them. */
+  workspaceChanges?: readonly WorkspaceChangeSet[];
 }
 
 export interface RunResultCompleted extends RunResultCommon {

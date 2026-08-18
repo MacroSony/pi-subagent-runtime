@@ -1,6 +1,7 @@
 import type {
   AccessCapabilities,
   BackendTool,
+  ExecutionBoundary,
   Fingerprint,
   ModelReference,
   RunUsage,
@@ -30,7 +31,7 @@ export interface ProcessRunReport {
   model: ModelReference;
   thinkingLevel?: string;
   effectiveToolNames: string[];
-  executionBoundary: "shared-user";
+  executionBoundary: ExecutionBoundary;
   workingDirectory: string;
   messages: unknown[];
   retention: {
@@ -53,6 +54,7 @@ export function createProcessReport(input: {
   effectiveToolNames: readonly string[];
   workingDirectory: string;
   startedAt: string;
+  executionBoundary?: ExecutionBoundary;
 }): ProcessRunReport {
   return {
     preparedRunId: input.preparedRunId,
@@ -64,7 +66,7 @@ export function createProcessReport(input: {
       ? {}
       : { thinkingLevel: input.thinkingLevel }),
     effectiveToolNames: [...input.effectiveToolNames],
-    executionBoundary: "shared-user",
+    executionBoundary: input.executionBoundary ?? "shared-user",
     workingDirectory: input.workingDirectory,
     messages: [],
     retention: createRetention(),
