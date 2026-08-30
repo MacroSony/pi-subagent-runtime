@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.0-beta.3] - 2026-08-30
+
+### Added
+
+- Add the Linux `pi-bwrap-write` backend for direct, sandbox-contained workspace
+  edits with explicit static/selected-model child authentication, git work-tree
+  preflight, dirty-tree diagnostics, and read-only top-level git metadata.
+- Run both Bubblewrap backends through the reusable conformance suite.
+
+### Changed
+
+- Recommend the simpler write-through-plus-git path for interactive hosts while
+  retaining `pi-bwrap-propose-write` as an experimental unattended-workflow lane.
+
 ## [0.1.0-beta.2]
 
 ### Changed

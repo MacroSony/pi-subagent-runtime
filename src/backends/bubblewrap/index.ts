@@ -1,4 +1,14 @@
 export {
+  PI_BUBBLEWRAP_WRITE_BACKEND_DESCRIPTOR,
+  PI_BUBBLEWRAP_WRITE_BACKEND_ID,
+  MAX_RETAINED_BUBBLEWRAP_WRITE_REPORT_BYTES,
+  PiBubblewrapWriteBackend,
+  sanitizePiBubblewrapWriteRunReport,
+  type PiBubblewrapWriteBackendOptions,
+  type PiBubblewrapWriteRunReport,
+  type PiBubblewrapWriteUsage,
+} from "./pi-bubblewrap-write-backend.ts";
+export {
   PI_BUBBLEWRAP_PROPOSE_WRITE_BACKEND_DESCRIPTOR,
   PI_BUBBLEWRAP_PROPOSE_WRITE_BACKEND_ID,
   PiBubblewrapBackend,
@@ -9,6 +19,7 @@ export {
 } from "./pi-bubblewrap-backend.ts";
 export {
   PI_BUBBLEWRAP_PROPOSAL_TOOL_CATALOG,
+  PI_BUBBLEWRAP_WRITE_TOOL_CATALOG,
   findBubblewrapExecutable,
   verifyBubblewrapExecutable,
 } from "./preflight-policy.ts";

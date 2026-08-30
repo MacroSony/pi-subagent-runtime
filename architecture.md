@@ -50,7 +50,8 @@ src/
 │   │                              process backends
 │   ├── subprocess/               Fresh `pi --mode text` read-only backend
 │   ├── rpc/                      Fresh `pi --mode rpc` read-only backend
-│   └── bubblewrap/               Linux proposal-write backend and change collector
+│   └── bubblewrap/               Linux Bubblewrap backends: write-through and
+│                                 proposal-write, with the change collector
 └── testing/                      Deterministic fake backend and conformance
 
 tests/                            Core, lifecycle, backend, and E2E coverage
@@ -205,7 +206,191 @@ independent-host tests     public package can be used outside Forge
 Every new backend should pass the reusable conformance suite and add focused
 tests for its claimed enforcement boundary and its failure modes.
 
+## Bubblewrap write-through MVP
+
+### Context and market check
+
+Before integrating a writable subagent backend into a host, we checked how
+peer agent products handle writable (sub)agents as of 2026-08:
+
+| Product | Writes | Containment | Review and recovery |
+| --- | --- | --- | --- |
+| Codex CLI | Direct to workspace | `workspace-write` sandbox (Landlock/Seatbelt); only declared roots writable | git; approval policies `untrusted`/`on-request`/`on-failure`/`never` |
+| Claude Code, incl. subagents | Direct; subagents inherit the parent's permission mode | Per-tool allow/deny rules; optional sandbox | git (docs: checkpoints are not a substitute) |
+| Gemini CLI | Direct; `auto_edit` auto-approves edit tools | Optional seatbelt/docker sandbox | git |
+| Codex subagents (GA 2026-03) | Workers write directly; per-agent `sandbox_mode` override in profile files | Parent sandbox policy inherited | git; approvals surface from child threads |
+| Async/cloud agents (Codex Cloud, Copilot coding agent) | Direct inside a per-task container | Container | git branch/PR is the review artifact |
+
+Two patterns dominate: interactive agents use direct write plus a kernel
+sandbox plus git recovery; async agents use container isolation plus a git
+branch/PR. No major product implements a custom collect-change-set-then-apply
+protocol. Codex additionally treats version control as a trust signal: a
+workspace not under version control defaults to read-only.
+
+### Decision
+
+The first writable backend this package integrates and recommends is a
+Linux write-through Bubblewrap backend:
+
+```text
+@zihanw/pi-subagent-runtime/backends/bubblewrap
+backend id: pi-bwrap-write
+```
+
+It runs Pi with `bash`, read/search, and edit/write tools inside the same
+closed Bubblewrap filesystem namespace as the proposal backend, but
+bind-mounts the real workspace read-write instead of a proposal copy.
+Containment comes from the sandbox: only the workspace is writable and the
+rest of the host filesystem is read-only or absent. Review and recovery come
+from git. The runtime collects no change set and applies nothing.
+
+The copy-based proposal backend (`pi-bwrap-propose-write`) remains
+implemented, tested, and exported as experimental, but leaves the release
+critical path. Its lease/change-set/apply machinery targets future
+unattended, high-autonomy runs; it is not how interactive hosts review
+writes today, and it requires a review/apply UX its hosts do not yet have.
+The write-capability model below (no-write / write-through / proposal) is
+unchanged; only the ship order changes.
+
+### MVP scope
+
+| Included | Deferred |
+| --- | --- |
+| Linux and an available working `bwrap` binary | macOS/Windows backends |
+| One read-write workspace, used as the working-directory root | Multiple workspace mount routing |
+| `network: allow`, needed for direct model provider transport | `network: deny` with a provider/proxy design |
+| Built-in `bash`, read/search, edit, and write tools (same catalog as the proposal backend) | Custom host tools and media |
+| Git work-tree requirement (overridable) with a dirty-tree warning | Non-git VCS support |
+| Read-only `.git` overlay inside the sandbox | Agent-driven git writes (commit/push/stash) |
+| Direct write-through; the host reviews with git | Observational diffs on results, change sets, apply |
+| Host serializes writers by policy | Parallel-writer coordination (a future worktree backend) |
+
+### Intent and enforcement contract
+
+The accepted intent shape matches the proposal backend: `workspace-write`,
+exactly one read-write workspace, the workspace root as working directory,
+an isolated execution boundary, `network: allow`, `allowProcess: true`,
+text-only tasks, an explicit thinking level, and tools drawn from the
+Bubblewrap catalog. Write-through differences:
+
+- The read-write mount is the configured workspace root itself, not a lease
+  copy. No proposal lease, revision loop, or change set exists, and
+  `RunResult.workspaceChanges` stays absent.
+- Git guards at preflight:
+  - the workspace root must be inside a git work tree (`git rev-parse`);
+    failure is an error unless the host sets `allowNonGitWorkspace`, in
+    which case it degrades to a warning;
+  - a dirty work tree (`git status --porcelain`) produces a warning,
+    because agent edits interleave with pre-existing uncommitted changes.
+- Launch guards:
+  - when a non-symlink `.git` entry exists at the workspace root it is
+    overlaid read-only inside the sandbox, and the child environment sets
+    `GIT_OPTIONAL_LOCKS=0`. This protects local git metadata; ordinary
+    read-only git commands work in a root checkout but are not guaranteed in
+    linked worktrees. When the repository root is an ancestor of the
+    workspace root, the sandbox simply does not mount it. Top-level only:
+    submodule `.git` entries are a documented gap.
+  - everything else matches the proposal launcher: a closed filesystem
+    namespace with explicit read-only runtime mounts, private
+    `/tmp`/`/proc`/`/dev`, `--die-with-parent`, and `--clearenv` with an
+    explicit environment map. Provider authentication must be forwarded
+    deliberately through static or selected-model environment values, or Pi's
+    explicit `--api-key`; the child never inherits the host environment.
+
+### Honesty notes
+
+This backend must not advertise more than it proves:
+
+- Workspace damage is possible by design; recovery is git. The sandbox
+  bounds damage to the workspace and keeps host secrets and unrelated
+  directories unreadable.
+- network allow plus forwarded provider credentials means the child has
+  real egress. Containment is filesystem and process, not network.
+- Concurrent writers are not coordinated. Hosts serialize writers by
+  policy; parallel write isolation is a future worktree backend's job.
+
+### Relationship to the proposal backend
+
+Write-through reuses, unchanged: the SDK preparation gate, the process
+bridge/report plumbing, cancellation and cleanup, Bubblewrap discovery and
+verification, the tool catalog, and most intent checks. The launcher learns
+one parameterization (the read-write bind source is the real workspace, plus
+the `.git` overlay). The proposal backend keeps its own preflight
+diagnostics namespace; shared code stays private to `backends/bubblewrap/`.
+
+The backend descriptor currently cannot express mutation mode
+(write-through vs proposal); the backend id and documentation carry that
+distinction in the MVP. A capability field can be added when a second
+proposal-capable backend appears and hosts need to negotiate it.
+
+### Delivered slices
+
+1. **Launcher parameterization and git guards**
+
+   - Read-write bind of the real workspace; read-only `.git` overlay and
+     `GIT_OPTIONAL_LOCKS=0`; work-tree detection and dirty-tree warning.
+
+2. **Backend, preflight, and descriptor**
+
+   - `PiBubblewrapWriteBackend` with backend id `pi-bwrap-write`, exported
+     from `./backends/bubblewrap`, with honest capability receipts and the
+     fail-closed intent checks above.
+
+3. **Verification**
+
+   - Real-Bubblewrap runs whose writes land in the real workspace while
+     outside-workspace and `.git` writes fail; no host-environment
+     inheritance; non-git rejection plus override; dirty-tree warning;
+     cancellation and cleanup. Both Bubblewrap backends join the reusable
+     conformance suite, closing the proposal backend's conformance gap.
+
+4. **Documentation**
+
+   - This section, README updates, and the decisions log below.
+
+### Exit criteria for the MVP
+
+- A host can run an isolated writer whose edits are visible in the real
+  workspace immediately after the run settles.
+- The sandbox blocks writes outside the workspace and any mutation of
+  `.git`; both are covered by tests.
+- Preflight rejects a non-git workspace by default and warns on a dirty
+  tree.
+- The child environment is exactly the host-configured map.
+- The reusable conformance suite passes for both Bubblewrap backends.
+- The proposal backend's tests stay green with no API changes.
+
+### Host integration plan (pi-forge-subagents)
+
+- Selecting a narrow backend in `subagents.json` is the authorization:
+  `pi-subprocess-readonly` and `pi-rpc-readonly` project read-only access,
+  while `pi-bwrap-write` projects isolated workspace-write access. No
+  duplicate `access` setting is added for the MVP.
+- Each backend registration owns its fixed access preset and tool catalog;
+  host code does not scatter backend-id conditionals. Backend preflight
+  independently verifies the projected intent. Provider authentication is
+  forwarded through the backend's explicit environment map.
+- No review/apply UX is added: the existing pre-execution approval covers
+  the run, and git is the review artifact. Host documentation recommends
+  delegating against a committed or stashed tree.
+- Development consumes this package via a `file:../pi-subagent-runtime`
+  dependency; after dogfooding, publish `0.1.0-beta.3` and bump the host
+  package's dependency.
+
+**Dogfood status (2026-08-30):** a real Pi host loaded the local Forge and
+subagent packages, delegated to `pi-bwrap-write`, reached the selected provider,
+and created an exact requested file in the real workspace. The file appeared as
+an ordinary untracked git change; repository metadata remained valid. A
+hermetic Forge-to-Bubblewrap integration test covers the same access projection
+and write path without provider availability.
+
 ## Bubblewrap write-proposal MVP
+
+> **Status (2026-08-30):** implemented, tested, and exported as
+> experimental, but deferred from the release and host-integration critical
+> path in favor of the write-through backend above. The lease, change-set,
+> and guarded-apply machinery below resumes for unattended, high-autonomy
+> lanes once hosts grow a review UX for it.
 
 ### Decision
 
@@ -442,3 +627,7 @@ support separately from filesystem-write tool availability.
 | 2026-08-18 | Treat a collected change set as authoritative and final assistant prose as explanation only. | A model can omit or misdescribe filesystem effects. |
 | 2026-08-18 | Make Bubblewrap proposal references backend-local opaque leases and return them in portable change sets. | The core result remains portable without exposing host filesystem paths or forcing a common apply transport. |
 | 2026-08-18 | Ship guarded apply as explicit check-then-apply, not a transaction. | Base/proposal checks give a no-write conflict path; cross-process source locking and rollback semantics require a later transactional design. |
+| 2026-08-30 | Ship a write-through Bubblewrap backend before integrating the proposal backend's apply lane. | A market check shows interactive agents standardize on direct write plus a kernel sandbox plus git recovery; no major product implements a custom collect/apply protocol, and hosts lack the review UX the proposal flow needs. |
+| 2026-08-30 | Require a git work tree (overridable) and overlay `.git` read-only in write-through runs. | git is the recovery layer for direct writes; a workspace without it has no safety net, and a subagent should not mutate version-control state. |
+| 2026-08-30 | Keep the proposal backend exported but experimental, off the release critical path. | Its lease/change-set/apply machinery targets future unattended runs; shipping it unchanged preserves the work without committing hosts to its UX. |
+| 2026-08-30 | A host derives access and tools from the selected narrow backend registration instead of adding a duplicate per-profile access setting. | Current backend ids are single-mode authorization choices (`readonly` or `write`); a second field would create invalid combinations without adding authority. Preflight still verifies the projected intent fail-closed. |

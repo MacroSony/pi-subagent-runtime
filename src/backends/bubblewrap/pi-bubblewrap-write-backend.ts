@@ -1,8 +1,8 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
-  cpSync,
   existsSync,
+  lstatSync,
   mkdtempSync,
   realpathSync,
   rmSync,
@@ -19,10 +19,7 @@ import {
   type BackendDescriptor,
   type BackendPreflightResult,
   type EnforcementReceipt,
-  type Fingerprint,
   type SealedPlanSnapshot,
-  type WorkspaceChangeSet,
-  type WorkspaceProposalReference,
 } from "../../core/index.ts";
 import type {
   AcceptedPreparationInput,
@@ -43,8 +40,10 @@ import {
   SUBPROCESS_REPORT_FD_ENV,
   sanitizeSubprocessReportValue,
 } from "../shared/report-sanitize.ts";
+import type { PiModelRegistry } from "../shared/pi-model-runtime.ts";
 import {
   MAX_PROCESS_STDERR_BYTES,
+  MAX_RETAINED_PROCESS_REPORT_BYTES,
   appendBounded,
   appendProcessReportMessage,
   captureProcessAssistantReceipt,
@@ -56,8 +55,8 @@ import {
   processToolResultSummary,
   sanitizeProcessRunReport,
   type ProcessRunReport,
+  type ProcessRunUsage,
 } from "../shared/process-report.ts";
-import type { PiModelRegistry } from "../shared/pi-model-runtime.ts";
 import {
   SdkPreparationGate,
   type PrimedPreparation,
@@ -67,171 +66,120 @@ import {
   type BubblewrapInvocation,
 } from "./bubblewrap-launcher.ts";
 import {
-  SourceWorkspaceChangedError,
-  ProposalWorkspaceChangedError,
-  applyWorkspaceChanges,
-  collectWorkspaceChanges,
-  createWorkspaceManifest,
-  type CollectedWorkspaceChangeSet,
-  type WorkspaceManifest,
-} from "./proposal-workspace.ts";
-import {
-  acceptedBubblewrapProposalPreflight,
-  evaluateBubblewrapProposalIntent,
+  acceptedBubblewrapWriteThroughPreflight,
+  evaluateBubblewrapWriteIntent,
   findBubblewrapExecutable,
   verifyBubblewrapExecutable,
 } from "./preflight-policy.ts";
 
-export const PI_BUBBLEWRAP_PROPOSE_WRITE_BACKEND_ID =
-  "pi-bwrap-propose-write";
-
-export const PI_BUBBLEWRAP_PROPOSE_WRITE_BACKEND_DESCRIPTOR: BackendDescriptor =
-  {
-    id: PI_BUBBLEWRAP_PROPOSE_WRITE_BACKEND_ID,
-    version: "0.1.0",
-    capabilities: {
-      access: {
-        readOnlyMountIsolation: false,
-        readWriteMountIsolation: true,
-        symlinkSafeContainment: true,
-        processIsolation: true,
-        agentNetworkIsolation: false,
-      },
-      executionBoundaries: ["isolated"],
-      limits: {
-        timeoutMs: ["host-abort"],
-        maxTurns: ["unsupported"],
-        tokenBudget: ["unsupported"],
-        maxOutputBytes: ["unsupported"],
-      },
-      cancellation: true,
-      mediaMimeTypes: [],
-      remoteTransport: true,
-      promptRuntimeFidelity: "backend-assisted",
+export const PI_BUBBLEWRAP_WRITE_BACKEND_ID = "pi-bwrap-write";
+export const PI_BUBBLEWRAP_WRITE_BACKEND_DESCRIPTOR: BackendDescriptor = {
+  id: PI_BUBBLEWRAP_WRITE_BACKEND_ID,
+  version: "0.1.0",
+  capabilities: {
+    access: {
+      readOnlyMountIsolation: false,
+      readWriteMountIsolation: true,
+      symlinkSafeContainment: true,
+      processIsolation: true,
+      agentNetworkIsolation: false,
     },
-  };
+    executionBoundaries: ["isolated"],
+    limits: {
+      timeoutMs: ["host-abort"],
+      maxTurns: ["unsupported"],
+      tokenBudget: ["unsupported"],
+      maxOutputBytes: ["unsupported"],
+    },
+    cancellation: true,
+    mediaMimeTypes: [],
+    remoteTransport: true,
+    promptRuntimeFidelity: "backend-assisted",
+  },
+};
 
-export type PiBubblewrapRunReport = ProcessRunReport;
+export type PiBubblewrapWriteUsage = ProcessRunUsage;
+export type PiBubblewrapWriteRunReport = ProcessRunReport;
+export const MAX_RETAINED_BUBBLEWRAP_WRITE_REPORT_BYTES =
+  MAX_RETAINED_PROCESS_REPORT_BYTES;
 
 const MAX_STDOUT_BYTES = 8 * 1024 * 1024;
 const MAX_REPORT_STREAM_BYTES = 8 * 1024 * 1024;
 const TERMINATE_GRACE_MS = 5_000;
 
-interface ActiveBubblewrapRun {
+interface ActiveBubblewrapWriteRun {
   child: ChildProcess;
-  runDirectory: string;
-  proposal: ProposalRecord;
   termination?: Promise<void>;
   terminationReason?: string;
 }
 
-type ProposalStatus = "ready" | "running" | "conflicted";
-
-interface ProposalRecord {
-  id: string;
-  workspaceHandle: string;
-  sourceRoot: string;
-  workspacePath: string;
-  leaseDirectory: string;
-  baseline: WorkspaceManifest;
-  status: ProposalStatus;
-  /** Single-writer lease held between `start` and terminal collection. */
-  activePreparedRunId?: string;
-  turns: number;
-  changeSet?: CollectedWorkspaceChangeSet;
-}
-
-export interface PiBubblewrapProposalSnapshot {
-  id: string;
-  workspaceHandle: string;
-  status: ProposalStatus;
-  baseTreeFingerprint: Fingerprint;
-  turns: number;
-  changeSet?: WorkspaceChangeSet;
-}
-
-export type PiBubblewrapProposalApplyResult =
-  | {
-      status: "applied";
-      proposal: WorkspaceProposalReference;
-      changeSet: WorkspaceChangeSet;
-    }
-  | {
-      status: "conflicted";
-      proposal: WorkspaceProposalReference;
-      reason: "source-changed" | "proposal-changed";
-      message: string;
-    }
-  | {
-      status: "unavailable" | "busy";
-      proposal: WorkspaceProposalReference;
-      message: string;
-    }
-  | {
-      status: "failed";
-      proposal: WorkspaceProposalReference;
-      message: string;
-      /** A non-conflict apply error can happen after source mutations begin. */
-      sourceMayBePartiallyApplied: true;
-    };
-
-export interface PiBubblewrapBackendOptions {
+export interface PiBubblewrapWriteBackendOptions {
   modelRegistry: PiModelRegistry;
   modelRuntime?: ModelRuntime;
-  /** Logical workspace root used during exact Pi prompt preparation. */
   cwd: string;
-  /** Private host-path mapping for the first backend's one workspace handle. */
+  /** Host paths for workspace handles accepted by this backend. */
   workspaceRoots: Readonly<Record<string, string>>;
   /** Optional absolute path to Bubblewrap; defaults to `bwrap` on PATH. */
   bwrapPath?: string;
+  /** Permit direct writes outside a git work tree (preflight warns). */
+  allowNonGitWorkspace?: boolean;
+  /** Extra host runtime paths mounted read-only inside Bubblewrap. */
+  runtimeReadOnlyPaths?: readonly string[];
   now?: () => Date;
   idFactory?: () => string;
   invocationFactory?: (piArgs: string[]) => BubblewrapInvocation;
   bridgePath?: string;
-  /** Additional explicit host runtime paths to mount read-only in Bubblewrap. */
-  runtimeReadOnlyPaths?: readonly string[];
-  /**
-   * Exact child environment, including provider authentication if needed.
-   * The Bubblewrap child never inherits the parent process environment.
-   */
+  /** Static child environment; never merged with the host process environment. */
   env?: Readonly<Record<string, string>>;
+  /** Resolve additional environment for only the model selected by this run. */
+  envForModel?: (
+    model: Readonly<{ provider: string; id: string }>,
+  ) =>
+    | Readonly<Record<string, string>>
+    | Promise<Readonly<Record<string, string>>>;
+  /**
+   * Resolve one model credential for Pi's explicit --api-key argument. The
+   * value can be inspected by the invoking OS user through process metadata.
+   */
+  apiKeyForModel?: (
+    model: Readonly<{ provider: string; id: string }>,
+  ) => string | undefined | Promise<string | undefined>;
 }
 
 /**
- * Linux Bubblewrap backend for a single proposal workspace. The parent-side
- * SDK gate preserves exact preparation; execution runs Pi and bash in an
- * isolated child whose only writable project mount is a temporary copy of the
- * requested workspace. The following proposal slice retains this copy and
- * derives a reviewable change set instead of cleaning it at terminal settle.
+ * Linux write-through backend. Exact parent-side preparation is followed by
+ * a fresh Pi child inside Bubblewrap. The real workspace is its only writable
+ * host mount; writes are immediate and git remains the recovery boundary.
  */
-export class PiBubblewrapBackend implements ExecutionBackend {
+export class PiBubblewrapWriteBackend implements ExecutionBackend {
   readonly descriptor: BackendDescriptor = structuredClone(
-    PI_BUBBLEWRAP_PROPOSE_WRITE_BACKEND_DESCRIPTOR,
+    PI_BUBBLEWRAP_WRITE_BACKEND_DESCRIPTOR,
   );
   readonly #preparations: SdkPreparationGate;
-  readonly #modelRegistry: PiModelRegistry;
   readonly #cwd: string;
   readonly #workspaceRoots: Readonly<Record<string, string>>;
   readonly #bwrapPath: string | undefined;
+  readonly #allowNonGitWorkspace: boolean;
+  readonly #runtimeReadOnlyPaths: readonly string[];
   readonly #now: () => Date;
   readonly #idFactory: () => string;
   readonly #invocationFactory: (piArgs: string[]) => BubblewrapInvocation;
   readonly #bridgePath: string;
-  readonly #runtimeReadOnlyPaths: readonly string[];
   readonly #env?: Readonly<Record<string, string>>;
-  readonly #active = new Map<string, ActiveBubblewrapRun>();
-  readonly #reports = new Map<string, PiBubblewrapRunReport>();
-  readonly #proposals = new Map<string, ProposalRecord>();
-  readonly #proposalByPreparedRun = new Map<string, string>();
+  readonly #envForModel?: PiBubblewrapWriteBackendOptions["envForModel"];
+  readonly #apiKeyForModel?: PiBubblewrapWriteBackendOptions["apiKeyForModel"];
+  readonly #modelRegistry: PiModelRegistry;
+  readonly #active = new Map<string, ActiveBubblewrapWriteRun>();
+  readonly #reports = new Map<string, PiBubblewrapWriteRunReport>();
 
-  constructor(options: PiBubblewrapBackendOptions) {
+  constructor(options: PiBubblewrapWriteBackendOptions) {
     this.#modelRegistry = options.modelRegistry;
     this.#preparations = new SdkPreparationGate({
       modelRegistry: options.modelRegistry,
       ...(options.modelRuntime ? { modelRuntime: options.modelRuntime } : {}),
       cwd: options.cwd,
       ...(options.now ? { now: options.now } : {}),
-      tempDirPrefix: "pi-subagent-runtime-bwrap-prepare-",
+      tempDirPrefix: "pi-subagent-runtime-bwrap-write-prepare-",
     });
     this.#cwd = options.cwd;
     this.#workspaceRoots = { ...options.workspaceRoots };
@@ -240,9 +188,10 @@ export class PiBubblewrapBackend implements ExecutionBackend {
       bwrapPath && verifyBubblewrapExecutable(bwrapPath)
         ? bwrapPath
         : undefined;
+    this.#allowNonGitWorkspace = options.allowNonGitWorkspace ?? false;
     this.#now = options.now ?? (() => new Date());
     this.#idFactory =
-      options.idFactory ?? (() => `pi-bwrap-preflight:${randomUUID()}`);
+      options.idFactory ?? (() => `pi-bwrap-write-preflight:${randomUUID()}`);
     this.#invocationFactory = options.invocationFactory ?? defaultPiInvocation;
     this.#bridgePath = options.bridgePath ?? defaultBridgePath();
     this.#runtimeReadOnlyPaths = [
@@ -251,38 +200,22 @@ export class PiBubblewrapBackend implements ExecutionBackend {
       ...(options.runtimeReadOnlyPaths ?? []),
     ];
     if (options.env) this.#env = options.env;
+    if (options.envForModel) this.#envForModel = options.envForModel;
+    if (options.apiKeyForModel) this.#apiKeyForModel = options.apiKeyForModel;
   }
 
   preflight(input: BackendPreflightInput): BackendPreflightResult {
-    const requestedWorkspace = input.intent.access.workspaces[0];
-    const proposal = this.#proposalForIntent(input.intent);
-    const workspaceRoots = { ...this.#workspaceRoots };
-    const proposalDiagnostics = [] as ReturnType<
-      typeof evaluateBubblewrapProposalIntent
-    >["diagnostics"];
-    if (input.intent.workspaceProposal) {
-      if (!proposal || proposal.status !== "ready") {
-        proposalDiagnostics.push({
-          level: "error",
-          code: "pi-bwrap.proposal",
-          message: `Unknown or unavailable Bubblewrap proposal: ${input.intent.workspaceProposal.id}.`,
-          path: "workspaceProposal.id",
-        });
-      } else if (requestedWorkspace) {
-        workspaceRoots[requestedWorkspace.handle] = proposal.workspacePath;
-      }
-    }
-    const { diagnostics, model } = evaluateBubblewrapProposalIntent(
+    const { diagnostics, model } = evaluateBubblewrapWriteIntent(
       input.intent,
       this.#modelRegistry,
       {
         cwd: this.#cwd,
-        workspaceRoots,
+        workspaceRoots: this.#workspaceRoots,
         ...(this.#bwrapPath ? { bwrapPath: this.#bwrapPath } : {}),
+        allowNonGitWorkspace: this.#allowNonGitWorkspace,
       },
-      "pi-bwrap",
+      "pi-bwrap-write",
     );
-    diagnostics.push(...proposalDiagnostics);
     const preflightId = this.#idFactory();
     if (
       diagnostics.some((diagnostic) => diagnostic.level === "error") ||
@@ -295,7 +228,7 @@ export class PiBubblewrapBackend implements ExecutionBackend {
         diagnostics,
       };
     }
-    return acceptedBubblewrapProposalPreflight({
+    return acceptedBubblewrapWriteThroughPreflight({
       descriptor: this.descriptor,
       preflightId,
       intent: input.intent,
@@ -323,37 +256,22 @@ export class PiBubblewrapBackend implements ExecutionBackend {
     ) {
       await this.#preparations.stop(primed);
       throw new Error(
-        "Pi Bubblewrap execution plan does not match its prepared prompt.",
+        "Pi Bubblewrap write execution plan does not match its prepared prompt.",
       );
     }
     await this.#preparations.stop(primed);
-
     const workspace = plan.intent.access.workspaces[0]!;
-    let proposal = this.#proposalForIntent(plan.intent);
-    let createdProposal = false;
-    if (plan.intent.workspaceProposal && !proposal) {
+    const configuredWorkspace = this.#workspaceRoots[workspace.handle];
+    if (!configuredWorkspace) {
       throw new Error(
-        `Bubblewrap proposal ${plan.intent.workspaceProposal.id} is no longer available for revision.`,
+        `Pi Bubblewrap write execution has no configured path for workspace ${workspace.handle}.`,
       );
     }
-    if (!proposal) {
-      const sourceWorkspace = this.#workspaceRoots[workspace.handle];
-      if (!sourceWorkspace) {
-        throw new Error(
-          `Pi Bubblewrap execution has no configured path for workspace ${workspace.handle}.`,
-        );
-      }
-      proposal = this.#createProposal(sourceWorkspace, workspace.handle);
-      createdProposal = true;
-    }
-    if (proposal.status !== "ready" || proposal.activePreparedRunId) {
-      if (createdProposal) this.#removeProposal(proposal);
-      throw new Error(`Bubblewrap proposal ${proposal.id} is not ready for a run.`);
-    }
+    const workspaceRoot = realpathSync(configuredWorkspace);
     if (!this.#bwrapPath) {
-      if (createdProposal) this.#removeProposal(proposal);
       throw new Error("Pi Bubblewrap executable disappeared after preflight.");
     }
+    const gitMetadataPath = protectedGitMetadataPath(workspaceRoot);
     const effectiveToolNames = plan.effectiveTools.map(
       (tool) => tool.backendToolName,
     );
@@ -372,21 +290,25 @@ export class PiBubblewrapBackend implements ExecutionBackend {
     this.#reports.set(plan.preparedRunId, report);
     context.emit({
       phase: "starting",
-      message: `Starting Bubblewrap proposal run with ${effectiveToolNames.join(", ") || "no tools"}.`,
+      message: `Starting Bubblewrap write run with ${effectiveToolNames.join(", ") || "no tools"}.`,
       details: processReportSummary(report),
     });
 
-    const runDirectory = mkdtempSync(join(tmpdir(), "pi-subagent-runtime-bwrap-run-"));
+    const runDir = mkdtempSync(join(tmpdir(), "pi-subagent-runtime-bwrap-write-run-"));
     let child: ChildProcess;
-    const previousChangeSet = proposal.changeSet;
     try {
-      proposal.status = "running";
-      proposal.activePreparedRunId = plan.preparedRunId;
-      delete proposal.changeSet;
-      this.#proposalByPreparedRun.set(plan.preparedRunId, proposal.id);
+      const modelEnv =
+        (await this.#envForModel?.({
+          provider: plan.preflight.model.provider,
+          id: plan.preflight.model.id,
+        })) ?? {};
+      const apiKey = await this.#apiKeyForModel?.({
+        provider: plan.preflight.model.provider,
+        id: plan.preflight.model.id,
+      });
       const bridgeInput = createBridgeInput(plan, effectiveToolNames);
-      const inputPath = join(runDirectory, "bridge-input.json");
-      const systemPromptPath = join(runDirectory, "system-prompt.md");
+      const inputPath = join(runDir, "bridge-input.json");
+      const systemPromptPath = join(runDir, "system-prompt.md");
       writeFileSync(inputPath, JSON.stringify(bridgeInput), {
         encoding: "utf8",
         mode: 0o600,
@@ -401,19 +323,23 @@ export class PiBubblewrapBackend implements ExecutionBackend {
         this.#bridgePath,
         systemPromptPath,
         bridgeInput.marker,
+        apiKey,
       );
       const invocation = this.#invocationFactory(piArgs);
       const childEnv = childEnvironment({
         ...(this.#env ?? {}),
+        ...modelEnv,
+        GIT_OPTIONAL_LOCKS: "0",
         [SUBPROCESS_BRIDGE_INPUT_ENV]: inputPath,
         [SUBPROCESS_REPORT_FD_ENV]: "3",
       });
       const bwrapArgs = bubblewrapArguments({
         invocation,
-        workspaceSourcePath: proposal.workspacePath,
+        workspaceSourcePath: workspaceRoot,
         workspacePath: this.#cwd,
-        runDirectory,
+        runDirectory: runDir,
         runtimeReadOnlyPaths: this.#runtimeReadOnlyPaths,
+        ...(gitMetadataPath ? { gitMetadataPath } : {}),
         env: childEnv,
       });
       child = spawn(this.#bwrapPath, bwrapArgs, {
@@ -423,13 +349,7 @@ export class PiBubblewrapBackend implements ExecutionBackend {
         env: {},
       });
     } catch (error) {
-      rmSync(runDirectory, { recursive: true, force: true });
-      if (createdProposal) this.#removeProposal(proposal);
-      else {
-        proposal.status = "ready";
-        delete proposal.activePreparedRunId;
-        if (previousChangeSet) proposal.changeSet = previousChangeSet;
-      }
+      rmSync(runDir, { recursive: true, force: true });
       report.status = context.signal.aborted ? "cancelled" : "failed";
       report.finishedAt = this.#now().toISOString();
       if (!context.signal.aborted) {
@@ -439,14 +359,7 @@ export class PiBubblewrapBackend implements ExecutionBackend {
       throw error;
     }
 
-    const terminal = this.#watchChild(
-      child,
-      plan,
-      report,
-      context,
-      runDirectory,
-      proposal,
-    );
+    const terminal = this.#watchChild(child, plan, report, context, runDir);
     return {
       result: terminal,
       cancel: async (reason) => {
@@ -455,9 +368,9 @@ export class PiBubblewrapBackend implements ExecutionBackend {
       dispose: async () => {
         await this.#terminateRun(
           plan.preparedRunId,
-          "Bubblewrap execution disposed.",
+          "Bubblewrap write execution disposed.",
         );
-        rmSync(runDirectory, { recursive: true, force: true });
+        rmSync(runDir, { recursive: true, force: true });
       },
     };
   }
@@ -470,225 +383,28 @@ export class PiBubblewrapBackend implements ExecutionBackend {
     await this.#preparations.stop(primed);
   }
 
-  takeReport(preparedRunId: string): PiBubblewrapRunReport | undefined {
+  /**
+   * Returns the sanitized retained report for a finished run and removes it
+   * from the backend. Reports are keyed by preparedRunId because a prepared
+   * handle executes at most once.
+   */
+  takeReport(preparedRunId: string): PiBubblewrapWriteRunReport | undefined {
     const report = this.#reports.get(preparedRunId);
     if (!report) return undefined;
     this.#reports.delete(preparedRunId);
     return sanitizeProcessRunReport(report, sanitizeSubprocessReportValue);
   }
 
-  /** Returns the retained proposal associated with a completed or active run. */
-  getProposal(preparedRunId: string): PiBubblewrapProposalSnapshot | undefined {
-    const proposalId = this.#proposalByPreparedRun.get(preparedRunId);
-    const proposal = proposalId ? this.#proposals.get(proposalId) : undefined;
-    return proposal ? proposalSnapshot(proposal) : undefined;
-  }
-
-  /** Removes a retained proposal after the host has rejected or applied it. */
-  async discardProposal(proposalId: string): Promise<void> {
-    const proposal = this.#proposals.get(proposalId);
-    if (!proposal) return;
-    const active = [...this.#active.entries()].find(
-      ([, run]) => run.proposal === proposal,
-    );
-    if (active) {
-      await this.#terminateRun(active[0], "Bubblewrap proposal discarded.");
-    }
-    this.#removeProposal(proposal);
-  }
-
-  /**
-   * Performs a host-authorized, guarded check-then-apply of a retained
-   * proposal. The exact reviewed change set must still match the retained
-   * revision. A source/proposal conflict is detected before mutation and
-   * leaves the original untouched. This operation is not transactionally
-   * atomic for non-conflict I/O failures, so hosts must serialize writers and
-   * treat `failed` as potentially partially applied.
-   */
-  async applyProposal(
-    reviewedChangeSet: WorkspaceChangeSet,
-  ): Promise<PiBubblewrapProposalApplyResult> {
-    const reference = reviewedChangeSet.proposal;
-    const proposal = this.#proposalForReference(reference);
-    const proposalReference = structuredClone(reference);
-    if (!proposal) {
-      return {
-        status: "unavailable",
-        proposal: proposalReference,
-        message: "Bubblewrap proposal is unavailable or belongs to another workspace.",
-      };
-    }
-    if (proposal.status === "running" || proposal.activePreparedRunId) {
-      return {
-        status: "busy",
-        proposal: proposalReference,
-        message: "Bubblewrap proposal is still running.",
-      };
-    }
-    if (proposal.status === "conflicted") {
-      return {
-        status: "conflicted",
-        proposal: proposalReference,
-        reason: "source-changed",
-        message: "Bubblewrap proposal is already conflicted and cannot be applied.",
-      };
-    }
-    const changeSet = proposalChangeSet(proposal);
-    if (!changeSet || !proposal.changeSet) {
-      return {
-        status: "unavailable",
-        proposal: proposalReference,
-        message: "Bubblewrap proposal has no completed change set to apply.",
-      };
-    }
-    if (canonicalJson(changeSet) !== canonicalJson(reviewedChangeSet)) {
-      return {
-        status: "conflicted",
-        proposal: proposalReference,
-        reason: "proposal-changed",
-        message:
-          "The reviewed change set does not match the proposal's current revision.",
-      };
-    }
-    try {
-      applyWorkspaceChanges({
-        sourceRoot: proposal.sourceRoot,
-        proposalRoot: proposal.workspacePath,
-        baseline: proposal.baseline,
-        changeSet: proposal.changeSet,
-      });
-    } catch (error) {
-      if (error instanceof SourceWorkspaceChangedError) {
-        proposal.status = "conflicted";
-        return {
-          status: "conflicted",
-          proposal: proposalReference,
-          reason: "source-changed",
-          message: error.message,
-        };
-      }
-      if (error instanceof ProposalWorkspaceChangedError) {
-        proposal.status = "conflicted";
-        return {
-          status: "conflicted",
-          proposal: proposalReference,
-          reason: "proposal-changed",
-          message: error.message,
-        };
-      }
-      return {
-        status: "failed",
-        proposal: proposalReference,
-        sourceMayBePartiallyApplied: true,
-        message: `Bubblewrap proposal apply failed: ${
-          error instanceof Error ? error.message : String(error)
-        }`,
-      };
-    }
-    this.#removeProposal(proposal);
-    return { status: "applied", proposal: proposalReference, changeSet };
-  }
-
+  /** Backend-level cleanup: stops preparations and terminates active runs. */
   async dispose(): Promise<void> {
     await this.#preparations.stopAll();
     await Promise.all(
       [...this.#active.keys()].map((preparedRunId) =>
-        this.#terminateRun(preparedRunId, "Bubblewrap backend disposed."),
+        this.#terminateRun(preparedRunId, "Bubblewrap write backend disposed."),
       ),
     );
     this.#active.clear();
-    for (const proposal of this.#proposals.values()) {
-      this.#removeProposal(proposal);
-    }
     this.#reports.clear();
-    this.#proposalByPreparedRun.clear();
-  }
-
-  #proposalForIntent(
-    intent: BoundExecutionInput["plan"]["intent"],
-  ): ProposalRecord | undefined {
-    return this.#proposalForReference(intent.workspaceProposal);
-  }
-
-  #proposalForReference(
-    reference: WorkspaceProposalReference | undefined,
-  ): ProposalRecord | undefined {
-    if (!reference) return undefined;
-    const proposal = this.#proposals.get(reference.id);
-    if (!proposal || proposal.workspaceHandle !== reference.workspaceHandle) {
-      return undefined;
-    }
-    return proposal;
-  }
-
-  #createProposal(sourceRoot: string, workspaceHandle: string): ProposalRecord {
-    const leaseDirectory = mkdtempSync(
-      join(tmpdir(), "pi-subagent-runtime-bwrap-proposal-"),
-    );
-    const workspacePath = join(leaseDirectory, "workspace");
-    try {
-      const canonicalSourceRoot = realpathSync(sourceRoot);
-      const baseline = createWorkspaceManifest(canonicalSourceRoot);
-      cpSync(canonicalSourceRoot, workspacePath, {
-        recursive: true,
-        force: false,
-        errorOnExist: true,
-        preserveTimestamps: true,
-        verbatimSymlinks: true,
-      });
-      const proposal: ProposalRecord = {
-        id: `pi-bwrap-proposal:${randomUUID()}`,
-        workspaceHandle,
-        sourceRoot: canonicalSourceRoot,
-        workspacePath,
-        leaseDirectory,
-        baseline,
-        status: "ready",
-        turns: 0,
-      };
-      this.#proposals.set(proposal.id, proposal);
-      return proposal;
-    } catch (error) {
-      rmSync(leaseDirectory, { recursive: true, force: true });
-      throw error;
-    }
-  }
-
-  #removeProposal(proposal: ProposalRecord): void {
-    this.#proposals.delete(proposal.id);
-    for (const [preparedRunId, proposalId] of this.#proposalByPreparedRun) {
-      if (proposalId === proposal.id) this.#proposalByPreparedRun.delete(preparedRunId);
-    }
-    rmSync(proposal.leaseDirectory, { recursive: true, force: true });
-  }
-
-  #collectProposalChanges(
-    proposal: ProposalRecord,
-    preparedRunId: string,
-    report: PiBubblewrapRunReport,
-  ): void {
-    try {
-      proposal.changeSet = collectWorkspaceChanges({
-        sourceRoot: proposal.sourceRoot,
-        proposalRoot: proposal.workspacePath,
-        baseline: proposal.baseline,
-      });
-      proposal.turns += 1;
-      proposal.status = "ready";
-    } catch (error) {
-      proposal.status = "conflicted";
-      delete proposal.changeSet;
-      report.errorMessage ??=
-        error instanceof SourceWorkspaceChangedError
-          ? error.message
-          : `Bubblewrap proposal change collection failed: ${
-              error instanceof Error ? error.message : String(error)
-            }`;
-    } finally {
-      if (proposal.activePreparedRunId === preparedRunId) {
-        delete proposal.activePreparedRunId;
-      }
-    }
   }
 
   async #terminateRun(
@@ -707,14 +423,13 @@ export class PiBubblewrapBackend implements ExecutionBackend {
   #watchChild(
     child: ChildProcess,
     plan: SealedPlanSnapshot,
-    report: PiBubblewrapRunReport,
+    report: PiBubblewrapWriteRunReport,
     context: BackendExecutionContext,
-    runDirectory: string,
-    proposal: ProposalRecord,
+    runDir: string,
   ): Promise<BackendResult> {
     let stdoutBytes = 0;
     let reportBytes = 0;
-    const active: ActiveBubblewrapRun = { child, runDirectory, proposal };
+    const active: ActiveBubblewrapWriteRun = { child };
     this.#active.set(plan.preparedRunId, active);
     const abort = () => {
       void this.#terminateRun(plan.preparedRunId, abortReason(context.signal));
@@ -732,7 +447,7 @@ export class PiBubblewrapBackend implements ExecutionBackend {
       try {
         event = JSON.parse(line) as Record<string, unknown>;
       } catch {
-        failStream("Bubblewrap bridge emitted malformed report JSON.");
+        failStream("Bubblewrap write bridge emitted malformed report JSON.");
         return;
       }
       if (event.type === "message_end" && event.message) {
@@ -758,24 +473,26 @@ export class PiBubblewrapBackend implements ExecutionBackend {
     };
 
     if (!child.stdout) {
-      failStream("Bubblewrap text output channel was unavailable.");
+      failStream("Bubblewrap write text output channel was unavailable.");
     } else {
       child.stdout.on("data", (chunk: Buffer) => {
         stdoutBytes += chunk.length;
         if (stdoutBytes > MAX_STDOUT_BYTES) {
-          failStream(`Bubblewrap text output exceeded ${MAX_STDOUT_BYTES} bytes.`);
+          failStream(
+            `Bubblewrap write text output exceeded ${MAX_STDOUT_BYTES} bytes.`,
+          );
         }
       });
     }
     const reportStream = child.stdio[3] as Readable | null;
     if (!reportStream) {
-      failStream("Bubblewrap bridge report channel was unavailable.");
+      failStream("Bubblewrap write bridge report channel was unavailable.");
     } else {
       reportStream.on("data", (chunk: Buffer) => {
         reportBytes += chunk.length;
         if (reportBytes > MAX_REPORT_STREAM_BYTES) {
           failStream(
-            `Sanitized Bubblewrap report stream exceeded ${MAX_REPORT_STREAM_BYTES} bytes.`,
+            `Sanitized Bubblewrap write report stream exceeded ${MAX_REPORT_STREAM_BYTES} bytes.`,
           );
         }
       });
@@ -785,7 +502,7 @@ export class PiBubblewrapBackend implements ExecutionBackend {
       );
     }
     if (!child.stderr) {
-      failStream("Bubblewrap error output channel was unavailable.");
+      failStream("Bubblewrap write error output channel was unavailable.");
     } else {
       child.stderr.on("data", (chunk: Buffer) => {
         if (Buffer.byteLength(report.stderr, "utf8") >= MAX_PROCESS_STDERR_BYTES) {
@@ -810,12 +527,11 @@ export class PiBubblewrapBackend implements ExecutionBackend {
         settled = true;
         context.signal.removeEventListener("abort", abort);
         this.#active.delete(plan.preparedRunId);
-        rmSync(runDirectory, { recursive: true, force: true });
+        rmSync(runDir, { recursive: true, force: true });
         if (outcome.code !== null) report.exitCode = outcome.code;
         if (outcome.signal !== null) report.signal = outcome.signal;
         report.finishedAt = this.#now().toISOString();
         if (outcome.spawnError) report.errorMessage = outcome.spawnError.message;
-        this.#collectProposalChanges(proposal, plan.preparedRunId, report);
         resolve(terminalResult(plan, report, active, context, outcome));
       };
       child.once("error", (error) =>
@@ -833,15 +549,15 @@ function requirePrimed(
 ): PrimedPreparation {
   const primed = preparation.state as PrimedPreparation | undefined;
   if (!primed || gate.get(preflightId) !== primed || primed.disposed) {
-    throw new Error("Pi Bubblewrap execution has no matching prepared plan.");
+    throw new Error("Pi Bubblewrap write execution has no matching prepared plan.");
   }
   return primed;
 }
 
 function terminalResult(
   plan: SealedPlanSnapshot,
-  report: PiBubblewrapRunReport,
-  active: ActiveBubblewrapRun,
+  report: PiBubblewrapWriteRunReport,
+  active: ActiveBubblewrapWriteRun,
   context: BackendExecutionContext,
   outcome: { code: number | null; spawnError?: Error },
 ): BackendResult {
@@ -851,22 +567,18 @@ function terminalResult(
     limits: structuredClone(plan.preflight.limits),
   };
   const usage = processRunUsage(report.usage);
-  const workspaceChanges = proposalChangeSet(active.proposal);
-  const changeSetResult = workspaceChanges
-    ? { workspaceChanges: [workspaceChanges] }
-    : {};
+
   if (context.signal.aborted || active.terminationReason) {
     report.status = "cancelled";
     context.emit({
       phase: "finishing",
-      message: "Bubblewrap subagent cancelled.",
+      message: "Subagent cancelled.",
       details: processReportSummary(report),
     });
     return {
       status: "cancelled",
       reason: active.terminationReason ?? abortReason(context.signal),
       enforcement,
-      ...changeSetResult,
       ...(usage ? { usage } : {}),
     };
   }
@@ -881,54 +593,57 @@ function terminalResult(
     const message =
       report.errorMessage ||
       report.stderr.trim() ||
-      `Pi Bubblewrap child exited with code ${outcome.code ?? "unknown"}.`;
+      `Pi Bubblewrap write exited with code ${outcome.code ?? "unknown"}.`;
     context.emit({
       phase: "finishing",
-      message: `Bubblewrap subagent failed: ${message}`,
+      message: `Subagent failed: ${message}`,
       details: processReportSummary(report),
     });
     return {
       status: "failed",
-      error: { code: "bubblewrap", message, retryable: false },
+      error: { code: "bubblewrap-write", message, retryable: false },
       enforcement,
-      ...changeSetResult,
       ...(usage ? { usage } : {}),
       ...(output ? { output: { text: output, partial: true } } : {}),
     };
   }
   if (!output) {
     report.status = "failed";
-    report.errorMessage = "Pi Bubblewrap child produced no assistant report.";
+    report.errorMessage = "Pi Bubblewrap write produced no assistant report.";
     context.emit({
       phase: "finishing",
-      message: "Bubblewrap subagent failed: no assistant report.",
+      message: "Subagent failed: no assistant report.",
       details: processReportSummary(report),
     });
     return {
       status: "failed",
       error: {
-        code: "bubblewrap-empty",
+        code: "bubblewrap-write-empty",
         message: report.errorMessage,
         retryable: false,
       },
       enforcement,
-      ...changeSetResult,
       ...(usage ? { usage } : {}),
     };
   }
   report.status = "completed";
   context.emit({
     phase: "finishing",
-    message: "Bubblewrap subagent report ready.",
+    message: "Subagent report ready.",
     details: processReportSummary(report),
   });
   return {
     status: "completed",
     output: { text: output, partial: false },
     enforcement,
-    ...changeSetResult,
     ...(usage ? { usage } : {}),
   };
+}
+
+export function sanitizePiBubblewrapWriteRunReport(
+  report: PiBubblewrapWriteRunReport,
+): PiBubblewrapWriteRunReport {
+  return sanitizeProcessRunReport(report, sanitizeSubprocessReportValue);
 }
 
 function createBridgeInput(
@@ -944,33 +659,6 @@ function createBridgeInput(
   };
 }
 
-function proposalSnapshot(proposal: ProposalRecord): PiBubblewrapProposalSnapshot {
-  const changeSet = proposalChangeSet(proposal);
-  return {
-    id: proposal.id,
-    workspaceHandle: proposal.workspaceHandle,
-    status: proposal.status,
-    baseTreeFingerprint: proposal.baseline.treeFingerprint,
-    turns: proposal.turns,
-    ...(changeSet
-      ? { changeSet }
-      : {}),
-  };
-}
-
-function proposalChangeSet(
-  proposal: ProposalRecord,
-): WorkspaceChangeSet | undefined {
-  if (!proposal.changeSet) return undefined;
-  return {
-    proposal: {
-      id: proposal.id,
-      workspaceHandle: proposal.workspaceHandle,
-    },
-    ...structuredClone(proposal.changeSet),
-  };
-}
-
 function defaultPiInvocation(piArgs: string[]): BubblewrapInvocation {
   const currentScript = process.argv[1];
   const isBunVirtualScript = currentScript?.startsWith("/$bunfs/root/");
@@ -982,9 +670,7 @@ function defaultPiInvocation(piArgs: string[]): BubblewrapInvocation {
     return { command: process.execPath, args: piArgs };
   }
   const piPath = findPathExecutable("pi");
-  if (!piPath) {
-    throw new Error("Pi CLI executable was not found on PATH.");
-  }
+  if (!piPath) throw new Error("Pi CLI executable was not found on PATH.");
   return { command: piPath, args: piArgs };
 }
 
@@ -998,10 +684,11 @@ function defaultBridgePath(): string {
 
 function subprocessArguments(
   plan: SealedPlanSnapshot,
-  toolNames: readonly string[],
+  toolNames: string[],
   bridgePath: string,
   systemPromptPath: string,
   marker: string,
+  apiKey?: string,
 ): string[] {
   const args = [
     "--mode",
@@ -1023,10 +710,22 @@ function subprocessArguments(
     "--no-context-files",
     "--approve",
   ];
+  if (apiKey) args.push("--api-key", apiKey);
   if (toolNames.length > 0) args.push("--tools", toolNames.join(","));
   else args.push("--no-tools");
   args.push(marker);
   return args;
+}
+
+function protectedGitMetadataPath(workspaceRoot: string): string | undefined {
+  const path = join(workspaceRoot, ".git");
+  try {
+    const entry = lstatSync(path);
+    if (entry.isSymbolicLink()) return undefined;
+    return entry.isDirectory() || entry.isFile() ? path : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function childEnvironment(
@@ -1075,5 +774,5 @@ async function terminateChild(child: ChildProcess): Promise<void> {
 function abortReason(signal: AbortSignal): string {
   return typeof signal.reason === "string" && signal.reason
     ? signal.reason
-    : "Bubblewrap execution cancelled.";
+    : "Bubblewrap write execution cancelled.";
 }

@@ -23,42 +23,42 @@ export const PI_BUBBLEWRAP_PROPOSAL_TOOL_CATALOG = [
   {
     id: "pi.read",
     name: "read",
-    description: "Read a file from the proposal workspace.",
+    description: "Read a file from the workspace.",
     effects: ["filesystem-read"] as const,
     adapterMapping: "pi:read",
   },
   {
     id: "pi.grep",
     name: "grep",
-    description: "Search proposal workspace file contents.",
+    description: "Search workspace file contents.",
     effects: ["filesystem-read"] as const,
     adapterMapping: "pi:grep",
   },
   {
     id: "pi.find",
     name: "find",
-    description: "Find files in the proposal workspace.",
+    description: "Find files in the workspace.",
     effects: ["filesystem-read"] as const,
     adapterMapping: "pi:find",
   },
   {
     id: "pi.ls",
     name: "ls",
-    description: "List proposal workspace files.",
+    description: "List workspace files.",
     effects: ["filesystem-read"] as const,
     adapterMapping: "pi:ls",
   },
   {
     id: "pi.edit",
     name: "edit",
-    description: "Edit a file in the proposal workspace.",
+    description: "Edit a file in the workspace.",
     effects: ["filesystem-write"] as const,
     adapterMapping: "pi:edit",
   },
   {
     id: "pi.write",
     name: "write",
-    description: "Write a file in the proposal workspace.",
+    description: "Write a file in the workspace.",
     effects: ["filesystem-write"] as const,
     adapterMapping: "pi:write",
   },
@@ -66,7 +66,7 @@ export const PI_BUBBLEWRAP_PROPOSAL_TOOL_CATALOG = [
     id: "pi.bash",
     name: "bash",
     description:
-      "Run a command in the isolated proposal workspace, including tests.",
+      "Run a command in the isolated workspace, including tests.",
     effects: [
       "filesystem-read",
       "filesystem-write",
@@ -77,10 +77,15 @@ export const PI_BUBBLEWRAP_PROPOSAL_TOOL_CATALOG = [
   },
 ] as const;
 
+/** Write-through and proposal modes intentionally expose the same tools. */
+export const PI_BUBBLEWRAP_WRITE_TOOL_CATALOG =
+  PI_BUBBLEWRAP_PROPOSAL_TOOL_CATALOG;
+
 export interface BubblewrapPreflightEnvironment {
   cwd: string;
   workspaceRoots: Readonly<Record<string, string>>;
   bwrapPath?: string;
+  allowNonGitWorkspace?: boolean;
 }
 
 export interface BubblewrapPreflightEvaluation {
@@ -89,9 +94,8 @@ export interface BubblewrapPreflightEvaluation {
 }
 
 /**
- * Policy for the first Bubblewrap proposal backend. The backend accepts a
- * deliberately narrow intent because one logical workspace is copied and
- * mounted over the exact cwd that Pi used during prompt preparation.
+ * Shared policy for the narrow Bubblewrap write backends. One logical workspace
+ * is mounted over the exact cwd that Pi used during prompt preparation.
  */
 export function evaluateBubblewrapProposalIntent(
   intent: ExecutionIntent,
@@ -110,7 +114,7 @@ export function evaluateBubblewrapProposalIntent(
     diagnostics.push(
       errorDiagnostic(
         `${codePrefix}.access`,
-        "The Bubblewrap proposal backend requires one read-write workspace.",
+        "The Bubblewrap write backend requires one read-write workspace.",
         "access",
       ),
     );
@@ -122,7 +126,7 @@ export function evaluateBubblewrapProposalIntent(
     diagnostics.push(
       errorDiagnostic(
         `${codePrefix}.cwd`,
-        "The Bubblewrap proposal backend requires the workspace root as its working directory.",
+        "The Bubblewrap write backend requires the workspace root as its working directory.",
         "access.workingDirectory",
       ),
     );
@@ -131,7 +135,7 @@ export function evaluateBubblewrapProposalIntent(
     diagnostics.push(
       errorDiagnostic(
         `${codePrefix}.boundary`,
-        "The Bubblewrap proposal backend requires an isolated execution boundary.",
+        "The Bubblewrap write backend requires an isolated execution boundary.",
         "access.executionBoundary",
       ),
     );
@@ -140,7 +144,7 @@ export function evaluateBubblewrapProposalIntent(
     diagnostics.push(
       errorDiagnostic(
         `${codePrefix}.network`,
-        "The first Bubblewrap proposal backend requires network allow for direct provider transport.",
+        "The first Bubblewrap write backend requires network allow for direct provider transport.",
         "access.network",
       ),
     );
@@ -149,7 +153,7 @@ export function evaluateBubblewrapProposalIntent(
     diagnostics.push(
       errorDiagnostic(
         `${codePrefix}.process`,
-        "The Bubblewrap proposal backend requires process permission so the agent can run tests with bash.",
+        "The Bubblewrap write backend requires process permission so the agent can run tests with bash.",
         "access.allowProcess",
       ),
     );
@@ -158,7 +162,7 @@ export function evaluateBubblewrapProposalIntent(
     diagnostics.push(
       errorDiagnostic(
         `${codePrefix}.media`,
-        "The first Bubblewrap proposal backend supports text tasks only.",
+        "The first Bubblewrap write backend supports text tasks only.",
         "media",
       ),
     );
@@ -169,7 +173,7 @@ export function evaluateBubblewrapProposalIntent(
       diagnostics.push(
         errorDiagnostic(
           `${codePrefix}.limit`,
-          `${name} cannot be enforced by the first Bubblewrap proposal backend.`,
+          `${name} cannot be enforced by the first Bubblewrap write backend.`,
           `limits.${name}`,
         ),
       );
@@ -186,7 +190,7 @@ export function evaluateBubblewrapProposalIntent(
     diagnostics.push(
       errorDiagnostic(
         `${codePrefix}.limit`,
-        "The first Bubblewrap proposal backend enforces timeouts only as host-abort, not backend-hard.",
+        "The first Bubblewrap write backend enforces timeouts only as host-abort, not backend-hard.",
         "limits.timeoutMs",
       ),
     );
@@ -196,7 +200,7 @@ export function evaluateBubblewrapProposalIntent(
     diagnostics.push(
       errorDiagnostic(
         `${codePrefix}.thinking`,
-        "The Bubblewrap proposal backend requires an explicit thinking level.",
+        "The Bubblewrap write backend requires an explicit thinking level.",
         "thinkingLevel",
       ),
     );
@@ -218,7 +222,7 @@ export function evaluateBubblewrapProposalIntent(
       diagnostics.push(
         errorDiagnostic(
           `${codePrefix}.tool`,
-          `Requested tool is unavailable in the Bubblewrap proposal backend: ${requested}.`,
+          `Requested tool is unavailable in the Bubblewrap write backend: ${requested}.`,
           `requestedTools[${index}]`,
         ),
       );
@@ -229,7 +233,7 @@ export function evaluateBubblewrapProposalIntent(
     diagnostics.push(
       errorDiagnostic(
         `${codePrefix}.platform`,
-        "The Bubblewrap proposal backend is available only on Linux.",
+        "The Bubblewrap write backend is available only on Linux.",
       ),
     );
   }
@@ -263,7 +267,7 @@ export function evaluateBubblewrapProposalIntent(
       diagnostics.push(
         errorDiagnostic(
           `${codePrefix}.workspace-cwd`,
-          "The first Bubblewrap proposal backend requires cwd to name an existing logical workspace path.",
+          "The first Bubblewrap write backend requires cwd to name an existing logical workspace path.",
           "access.workspaces[0]",
         ),
       );
@@ -325,6 +329,53 @@ export function evaluateBubblewrapProposalIntent(
   return { diagnostics, model };
 }
 
+export function evaluateBubblewrapWriteIntent(
+  intent: ExecutionIntent,
+  modelRegistry: PiModelRegistry,
+  environment: BubblewrapPreflightEnvironment,
+  codePrefix: string,
+): BubblewrapPreflightEvaluation {
+  const evaluation = evaluateBubblewrapProposalIntent(
+    intent,
+    modelRegistry,
+    environment,
+    codePrefix,
+  );
+  const workspace = intent.access.workspaces[0];
+  const configuredRoot = workspace
+    ? environment.workspaceRoots[workspace.handle]
+    : undefined;
+  if (!configuredRoot || !canonicalDirectory(configuredRoot)) return evaluation;
+
+  const git = gitWorkspaceStatus(configuredRoot);
+  if (!git.insideWorkTree) {
+    evaluation.diagnostics.push(
+      environment.allowNonGitWorkspace
+        ? {
+            level: "warning",
+            code: `${codePrefix}.git-required`,
+            message:
+              "The Bubblewrap write-through backend is running without a git recovery boundary.",
+            path: "access.workspaces[0]",
+          }
+        : errorDiagnostic(
+            `${codePrefix}.git-required`,
+            "The Bubblewrap write-through backend requires a git work tree unless allowNonGitWorkspace is enabled.",
+            "access.workspaces[0]",
+          ),
+    );
+  } else if (git.dirty) {
+    evaluation.diagnostics.push({
+      level: "warning",
+      code: `${codePrefix}.git-dirty`,
+      message:
+        "The git work tree is dirty; subagent writes will mix with existing uncommitted changes.",
+      path: "access.workspaces[0]",
+    });
+  }
+  return evaluation;
+}
+
 export function acceptedBubblewrapProposalPreflight(input: {
   descriptor: BackendDescriptor;
   preflightId: string;
@@ -332,6 +383,29 @@ export function acceptedBubblewrapProposalPreflight(input: {
   model: Model<any>;
   diagnostics: readonly Diagnostic[];
 }): BackendPreflightAccepted {
+  return acceptedBubblewrapWritePreflight(input, "proposal-workspace");
+}
+
+export function acceptedBubblewrapWriteThroughPreflight(input: {
+  descriptor: BackendDescriptor;
+  preflightId: string;
+  intent: ExecutionIntent;
+  model: Model<any>;
+  diagnostics: readonly Diagnostic[];
+}): BackendPreflightAccepted {
+  return acceptedBubblewrapWritePreflight(input, "workspace");
+}
+
+function acceptedBubblewrapWritePreflight(
+  input: {
+    descriptor: BackendDescriptor;
+    preflightId: string;
+    intent: ExecutionIntent;
+    model: Model<any>;
+    diagnostics: readonly Diagnostic[];
+  },
+  mountId: string,
+): BackendPreflightAccepted {
   const workspace = input.intent.access.workspaces[0]!;
   const limits: BackendPreflightAccepted["limits"] = {};
   if (input.intent.limits.timeoutMs) {
@@ -354,11 +428,11 @@ export function acceptedBubblewrapProposalPreflight(input: {
       mounts: [
         {
           workspaceHandle: workspace.handle,
-          mountId: "proposal-workspace",
+          mountId,
           mode: "read-write",
         },
       ],
-      workingDirectory: { mountId: "proposal-workspace", path: "." },
+      workingDirectory: { mountId, path: "." },
       network: "allow",
       process: true,
       executionBoundary: "isolated",
@@ -402,6 +476,33 @@ export function verifyBubblewrapExecutable(path: string): boolean {
     return /\bbubblewrap\s+\d/i.test(`${result.stdout}\n${result.stderr}`);
   } catch {
     return false;
+  }
+}
+
+function gitWorkspaceStatus(path: string): {
+  insideWorkTree: boolean;
+  dirty: boolean;
+} {
+  try {
+    const inside = spawnSync(
+      "git",
+      ["-C", path, "rev-parse", "--is-inside-work-tree"],
+      { encoding: "utf8", timeout: 2_000, windowsHide: true },
+    );
+    if (inside.error || inside.status !== 0 || inside.stdout.trim() !== "true") {
+      return { insideWorkTree: false, dirty: false };
+    }
+    const status = spawnSync(
+      "git",
+      ["-C", path, "status", "--porcelain", "--untracked-files=normal"],
+      { encoding: "utf8", timeout: 2_000, windowsHide: true },
+    );
+    return {
+      insideWorkTree: true,
+      dirty: Boolean(status.error || status.status !== 0 || status.stdout.trim()),
+    };
+  } catch {
+    return { insideWorkTree: false, dirty: false };
   }
 }
 

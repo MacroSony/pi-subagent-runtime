@@ -8,8 +8,10 @@ export interface BubblewrapInvocation {
 
 export interface BubblewrapLauncherOptions {
   invocation: BubblewrapInvocation;
-  /** Host proposal directory mounted read-write at the logical workspace path. */
-  proposalPath: string;
+  /** Host directory mounted read-write at the logical workspace path. */
+  workspaceSourcePath: string;
+  /** Optional host .git entry overlaid read-only at workspacePath/.git. */
+  gitMetadataPath?: string;
   /** The path Pi observed during preparation and will observe inside bwrap. */
   workspacePath: string;
   /** Per-run bridge input and system prompt directory, mounted read-only. */
@@ -29,7 +31,10 @@ export function bubblewrapArguments(
   options: BubblewrapLauncherOptions,
 ): string[] {
   const workspacePath = absolutePath(options.workspacePath, "workspacePath");
-  const proposalPath = absolutePath(options.proposalPath, "proposalPath");
+  const workspaceSourcePath = absolutePath(
+    options.workspaceSourcePath,
+    "workspaceSourcePath",
+  );
   const runDirectory = absolutePath(options.runDirectory, "runDirectory");
   const invocationCommand = absolutePath(
     options.invocation.command,
@@ -92,7 +97,10 @@ export function bubblewrapArguments(
   // This bind intentionally follows the immutable runtime mounts: it is the
   // only read-write project view supplied to the Pi child and its bash tools.
   ensureParent(workspacePath);
-  args.push("--bind", proposalPath, workspacePath);
+  args.push("--bind", workspaceSourcePath, workspacePath);
+  if (options.gitMetadataPath) {
+    roBind(options.gitMetadataPath, `${workspacePath}/.git`);
+  }
   roBind(runDirectory);
 
   const childEnv = {

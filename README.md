@@ -41,7 +41,7 @@ The project targets a narrower gap than a general subagent package:
 - inspectable prepared plans for host-owned approval;
 - evented run handles, cancellation, cleanup, and terminal results;
 - enforcement receipts that distinguish tool policy from OS isolation;
-- an experimental Bubblewrap proposal writer with reviewable change sets;
+- Linux Bubblewrap writers for direct git-backed edits and experimental reviewable proposals;
 - reusable backend conformance tests.
 
 An enforcement receipt is a backend attestation. The runtime validates
@@ -164,6 +164,28 @@ bounded TERM-to-KILL process termination when the run does not settle.
 Both initial process backends report a shared-user boundary unless a separate
 sandbox implementation launches the entire process under stronger
 enforcement.
+
+## Bubblewrap write-through writer
+
+On Linux with a verified `bwrap` binary, the
+`@zihanw/pi-subagent-runtime/backends/bubblewrap` entry point provides
+`pi-bwrap-write` through `PiBubblewrapWriteBackend`. It accepts one writable
+workspace at its root and runs Pi plus `bash` in a closed Bubblewrap namespace.
+The real workspace is its only writable host mount, so edits appear immediately
+while unrelated host paths and environment variables remain unavailable.
+
+This mode deliberately uses git rather than a runtime apply protocol. Preflight
+requires a git work tree by default and warns when it is dirty; set
+`allowNonGitWorkspace: true` only when the host accepts direct writes without
+that recovery boundary. A non-symlink top-level `.git` entry is overlaid
+read-only so the child cannot mutate local repository metadata. Review or
+revert the resulting files with normal git tooling after the run.
+
+The child starts with `--clearenv`; pass static variables through `env`,
+selected-model variables through `envForModel`, and an optional resolved model
+credential through `apiKeyForModel` (forwarded as Pi's `--api-key`). Nothing is
+inherited from the host environment. The backend requires `workspace-write`, one read-write root workspace, an isolated
+boundary, `network: allow`, and `allowProcess: true`.
 
 ## Bubblewrap proposal writer
 
