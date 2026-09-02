@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { fauxAssistantMessage } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 
 import { createFixturePiRuntime } from "./helpers/fixture-pi-runtime.ts";
 import type {
@@ -140,6 +140,86 @@ test("in-process backend resumes the primed session against an extension-registe
     assert.equal(report.executionFingerprint, plan.executionFingerprint);
     assert.equal(report.usage.turns, 1);
     assert.equal(backend.takeReport(prepared.id), undefined);
+  } finally {
+    await runtime.dispose();
+    await backend.dispose();
+    modelRegistry.unregisterProvider(PROVIDER);
+  }
+});
+
+test("in-process multi-turn runs keep the sealed conversation and never leak the preparation trigger", async () => {
+  const observedContexts: Array<{ userTexts: string[]; hasToolResult: boolean }> = [];
+  const { faux, modelRegistry } = await createFixturePiRuntime({
+    provider: PROVIDER,
+    api: API,
+    modelId: MODEL_ID,
+  });
+  faux.setResponses([
+    // Turn 1: request a real tool call so the agent loop takes a second turn.
+    fauxAssistantMessage(fauxToolCall("read", { path: "package.json" })),
+    // Turn 2: record the provider-visible context, then finish.
+    (context) => {
+      const messages = context.messages ?? [];
+      const userTexts: string[] = [];
+      let hasToolResult = false;
+      for (const message of messages) {
+        if (message.role === "user") {
+          const content = message.content;
+          if (typeof content === "string") userTexts.push(content);
+          else if (Array.isArray(content)) {
+            for (const part of content) {
+              if (part?.type === "text" && typeof part.text === "string") {
+                userTexts.push(part.text);
+              }
+            }
+          }
+        }
+        if (message.role === "toolResult") hasToolResult = true;
+      }
+      observedContexts.push({ userTexts, hasToolResult });
+      return fauxAssistantMessage("Multi-turn fixture complete.");
+    },
+  ]);
+
+  const backend = new PiInProcessBackend({
+    modelRegistry,
+    cwd: process.cwd(),
+  });
+  const runtime = createExecutionRuntime();
+  runtime.registerBackend(backend);
+
+  try {
+    const prepared = await runtime.prepare({
+      backendId: PI_INPROCESS_BACKEND_ID,
+      intent: fixtureIntent(),
+      compile: async () => fixtureConversation(),
+    });
+    const result = await runtime.execute(prepared).result;
+    assert.equal(result.status, "completed");
+    if (result.status !== "completed") return;
+    assert.equal(result.output.text, "Multi-turn fixture complete.");
+
+    // The second provider request must still carry the sealed task, must show
+    // the accumulated tool result, and must not contain the trigger prompt.
+    assert.equal(observedContexts.length, 1);
+    const observed = observedContexts[0]!;
+    assert.ok(
+      observed.userTexts.some((text) => text.includes("Do the fixture task.")),
+      "sealed task missing from the turn-2 provider context",
+    );
+    assert.ok(
+      observed.hasToolResult,
+      "accumulated tool result missing from the turn-2 provider context",
+    );
+    assert.ok(
+      observed.userTexts.every(
+        (text) =>
+          !text.includes(
+            "Prepare the subagent prompt runtime without contacting the provider.",
+          ),
+      ),
+      "preparation trigger leaked into the provider context",
+    );
   } finally {
     await runtime.dispose();
     await backend.dispose();

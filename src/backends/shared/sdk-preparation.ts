@@ -48,6 +48,22 @@ export interface PrimedPreparation {
   providerGate: Deferred<void>;
   execution: Promise<void>;
   disposed: boolean;
+  /**
+   * Permanently blocks provider transport for this preparation at the stream
+   * level. Extension-hook errors are caught by the Pi event runner, so a
+   * rejected providerGate alone cannot stop a provider call; this can.
+   */
+  stopTransport: () => void;
+}
+
+/** A preparation that has started but not yet primed; tracked so stopAll() cannot miss it. */
+interface InFlightPreparation {
+  tempDir: string;
+  providerGate: Deferred<void>;
+  stopTransport: () => void;
+  session?: AgentSession;
+  cancelled: boolean;
+  done: Deferred<void>;
 }
 
 export interface SdkPreparationGateOptions {
@@ -81,6 +97,7 @@ export class SdkPreparationGate {
   readonly #tempDirPrefix: string;
   readonly #executablePreparations: boolean;
   readonly #primed = new Map<string, PrimedPreparation>();
+  readonly #inFlight = new Set<InFlightPreparation>();
 
   constructor(options: SdkPreparationGateOptions) {
     this.#modelRegistry = options.modelRegistry;
@@ -120,6 +137,20 @@ export class SdkPreparationGate {
     const preparationReady = deferred<PreparedConversation>();
     let runtime: PromptRuntime | undefined;
     let session: AgentSession | undefined;
+    let execution: Promise<void> | undefined;
+    // Extension-hook errors are swallowed by the Pi event runner, so provider
+    // transport is additionally blocked in the stream path itself.
+    let transportStopped = false;
+    const inFlight: InFlightPreparation = {
+      tempDir,
+      providerGate,
+      stopTransport: () => {
+        transportStopped = true;
+      },
+      cancelled: false,
+      done: deferred<void>(),
+    };
+    this.#inFlight.add(inFlight);
     try {
       const settingsManager = SettingsManager.create(this.#cwd, tempDir, {
         projectTrusted: true,
@@ -152,7 +183,7 @@ export class SdkPreparationGate {
       const created = await createAgentSession({
         cwd: this.#cwd,
         agentDir: tempDir,
-        modelRuntime: this.#modelRuntime,
+        modelRuntime: transportGatedRuntime(this.#modelRuntime, () => transportStopped),
         model,
         thinkingLevel: input.preflight.thinkingLevel as ThinkingLevel,
         resourceLoader,
@@ -162,12 +193,16 @@ export class SdkPreparationGate {
         tools: effectiveToolNames,
       });
       session = created.session;
+      inFlight.session = session;
       session.setActiveToolsByName(effectiveToolNames);
-      const execution = this.#startPreparation(session, preparationReady);
+      execution = this.#startPreparation(session, preparationReady);
       const conversation = await abortable(
         preparationReady.promise,
         context.signal,
       );
+      if (inFlight.cancelled) {
+        throw new Error("Pi preparation was disposed before it completed.");
+      }
       if (!runtime) {
         throw new Error(
           "Pi preparation completed without a prompt runtime.",
@@ -182,19 +217,25 @@ export class SdkPreparationGate {
         providerGate,
         execution,
         disposed: false,
+        stopTransport: inFlight.stopTransport,
       };
       this.#primed.set(input.preflight.preflightId, primed);
       return { runtime, conversation, state: primed };
     } catch (error) {
+      inFlight.stopTransport();
       providerGate.reject(
         new Error("Dry preparation stopped before provider transport."),
       );
+      if (execution) void execution.catch(() => undefined);
       if (session) {
         await session.abort().catch(() => undefined);
         session.dispose();
       }
       rmSync(tempDir, { recursive: true, force: true });
       throw error;
+    } finally {
+      this.#inFlight.delete(inFlight);
+      inFlight.done.resolve();
     }
   }
 
@@ -203,6 +244,7 @@ export class SdkPreparationGate {
     if (primed.disposed) return;
     primed.disposed = true;
     this.#primed.delete(primed.preflightId);
+    primed.stopTransport();
     void primed.session.abort();
     primed.providerGate.reject(
       new Error("Dry preparation completed without provider transport."),
@@ -227,6 +269,19 @@ export class SdkPreparationGate {
   }
 
   async stopAll(): Promise<void> {
+    // Cancel preparations that have not primed yet; they would otherwise
+    // insert themselves into the primed map after stopAll() has iterated it.
+    for (const record of [...this.#inFlight]) {
+      record.cancelled = true;
+      record.stopTransport();
+      record.providerGate.reject(
+        new Error("Pi preparation gate disposed during preparation."),
+      );
+      if (record.session) void record.session.abort();
+    }
+    await Promise.all(
+      [...this.#inFlight].map((record) => record.done.promise),
+    );
     for (const primed of [...this.#primed.values()]) await this.stop(primed);
   }
 
@@ -256,26 +311,35 @@ export class SdkPreparationGate {
           throw error;
         }
       });
-      let contextSeeded = false;
-      pi.on("context", () => {
+      pi.on("context", (event) => {
         if (!compiled) {
           throw new Error(
             "Pi context event arrived before host preparation.",
           );
         }
-        // Executable preparations seed the compiled conversation once, before
-        // the first (gated) provider request. Later turns must keep their
-        // accumulated assistant/tool messages or the agent loop would reset.
-        if (this.#executablePreparations && contextSeeded) return undefined;
-        contextSeeded = true;
+        const compiledMessages = compiled.messages.map((message, index) =>
+          preparedMessageToAgentMessage(message, input.preflight.model, index),
+        );
+        if (!this.#executablePreparations) {
+          // Dry preparations park before the first provider request, so the
+          // whole-list replacement below only ever fires once.
+          return { messages: compiledMessages };
+        }
+        // Executable preparations: transformContext only rewrites the outgoing
+        // request; the trigger stays in the agent transcript. Replace the
+        // trigger with the compiled conversation on every provider request so
+        // later turns keep their accumulated assistant/tool messages without
+        // losing the sealed conversation or leaking the trigger.
+        const triggerIndex = event.messages.findIndex((message) =>
+          isTriggerMessage(message),
+        );
+        if (triggerIndex === -1) return undefined;
         return {
-          messages: compiled.messages.map((message, index) =>
-            preparedMessageToAgentMessage(
-              message,
-              input.preflight.model,
-              index,
-            ),
-          ),
+          messages: [
+            ...event.messages.slice(0, triggerIndex),
+            ...compiledMessages,
+            ...event.messages.slice(triggerIndex + 1),
+          ],
         };
       });
       pi.on("before_provider_request", async () => {
@@ -326,8 +390,58 @@ export class SdkPreparationGate {
       await session.waitForIdle();
     } catch (error) {
       preparationReady.reject(error);
+      // Once preparation has already resolved the rejection above is a no-op;
+      // still propagate so in-process executions observe the real failure
+      // instead of a generic "no assistant report".
+      throw error;
     }
   }
+}
+
+function isTriggerMessage(message: AgentMessage): boolean {
+  if (message.role !== "user") return false;
+  const content = (message as { content?: unknown }).content;
+  if (typeof content === "string") return content === PREPARATION_TRIGGER_PROMPT;
+  if (Array.isArray(content)) {
+    const first = content[0] as { type?: unknown; text?: unknown } | undefined;
+    return (
+      content.length === 1 &&
+      first?.type === "text" &&
+      first.text === PREPARATION_TRIGGER_PROMPT
+    );
+  }
+  return false;
+}
+
+/**
+ * Proxy around the host ModelRuntime that refuses provider transport once the
+ * preparation has been stopped. The Pi event runner catches extension-hook
+ * errors, so the before_provider_request gate alone cannot guarantee a stopped
+ * preparation never reaches the provider.
+ */
+function transportGatedRuntime(
+  modelRuntime: ModelRuntime,
+  isStopped: () => boolean,
+): ModelRuntime {
+  return new Proxy(modelRuntime, {
+    get(target, property) {
+      if (property === "streamSimple") {
+        return (...args: unknown[]) => {
+          if (isStopped()) {
+            throw new Error(
+              "Pi preparation was stopped before provider transport.",
+            );
+          }
+          const streamSimple = Reflect.get(target, property, target) as (
+            ...streamArgs: unknown[]
+          ) => unknown;
+          return streamSimple.apply(target, args);
+        };
+      }
+      const value = Reflect.get(target, property, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
 }
 
 export interface Deferred<T> {

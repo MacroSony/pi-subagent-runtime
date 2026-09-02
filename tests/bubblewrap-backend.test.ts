@@ -337,14 +337,24 @@ test(
         compile: async () => fixtureConversation(),
       });
       const revisionRun = runtime.execute(revision);
-      const competingResult = await runtime.execute(competingRevision).result;
-      assert.equal(competingResult.status, "failed");
-      if (competingResult.status === "failed") {
-        assert.match(competingResult.error.message, /not ready for a run/);
+      const competingRun = runtime.execute(competingRevision);
+      const [revisionResult, competingResult] = await Promise.all([
+        revisionRun.result,
+        competingRun.result,
+      ]);
+      // The two starts race asynchronously, so either competitor may win; the
+      // contract guarantees exactly one runs and the other fails cleanly.
+      const results = [revisionResult, competingResult];
+      const winnerResult = results.find((result) => result.status === "completed");
+      const loserResult = results.find((result) => result.status === "failed");
+      assert.ok(winnerResult, "exactly one competing revision should run");
+      assert.ok(loserResult, "the losing revision should fail");
+      if (loserResult.status === "failed") {
+        assert.match(loserResult.error.message, /not ready for a run/);
       }
-      const revisionResult = await revisionRun.result;
-      assert.equal(revisionResult.status, "completed");
-      const revisedProposal = backend.getProposal(revision.id);
+      const winnerPrepared =
+        winnerResult === revisionResult ? revision : competingRevision;
+      const revisedProposal = backend.getProposal(winnerPrepared.id);
       assert.ok(revisedProposal);
       assert.equal(revisedProposal.id, proposal.id);
       assert.equal(revisedProposal.turns, 2);

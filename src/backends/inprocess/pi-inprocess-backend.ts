@@ -80,6 +80,8 @@ export interface PiInProcessBackendOptions {
   tempDirPrefix?: string;
 }
 
+const TERMINATE_GRACE_MS = 3_000;
+
 interface ActiveInProcessRun {
   session: PrimedPreparation["session"];
   terminationReason?: string;
@@ -182,10 +184,13 @@ export class PiInProcessBackend implements ExecutionBackend {
     // provider gate, the execution promise, and tempDir cleanup.
     this.#preparations.take(plan.preflightId);
 
-    const effectiveToolNames = plan.effectiveTools.map(
-      (tool) => tool.backendToolName,
-    );
-    const report = createProcessReport({
+    let effectiveToolNames: string[];
+    let report: ProcessRunReport;
+    try {
+      effectiveToolNames = plan.effectiveTools.map(
+        (tool) => tool.backendToolName,
+      );
+      report = createProcessReport({
       preparedRunId: plan.preparedRunId,
       executionFingerprint: plan.executionFingerprint,
       model: plan.preflight.model,
@@ -194,15 +199,21 @@ export class PiInProcessBackend implements ExecutionBackend {
         : { thinkingLevel: plan.preflight.thinkingLevel }),
       effectiveToolNames,
       workingDirectory: this.#cwd,
-      startedAt: this.#now().toISOString(),
-      executionBoundary: "shared-user",
-    });
-    this.#reports.set(plan.preparedRunId, report);
-    context.emit({
-      phase: "starting",
-      message: `Starting in-process run with ${effectiveToolNames.join(", ") || "no tools"}.`,
-      details: processReportSummary(report),
-    });
+        startedAt: this.#now().toISOString(),
+        executionBoundary: "shared-user",
+      });
+      this.#reports.set(plan.preparedRunId, report);
+      context.emit({
+        phase: "starting",
+        message: `Starting in-process run with ${effectiveToolNames.join(", ") || "no tools"}.`,
+        details: processReportSummary(report),
+      });
+    } catch (error) {
+      // Ownership already transferred: clean up here, because discard() can no
+      // longer see this preparation in the gate.
+      await this.#cleanupRun(plan.preparedRunId, primed);
+      throw error;
+    }
 
     const active: ActiveInProcessRun = { session: primed.session };
     this.#active.set(plan.preparedRunId, active);
@@ -312,7 +323,14 @@ export class PiInProcessBackend implements ExecutionBackend {
     if (active.terminationReason === undefined && reason !== undefined) {
       active.terminationReason = reason;
     }
-    active.termination ??= active.session.abort().catch(() => undefined);
+    // Bounded escalation: a non-cooperative provider stream or tool can ignore
+    // the abort signal, and neither cancel() nor dispose() may hang on it.
+    active.termination ??= (async () => {
+      await Promise.race([
+        active.session.abort().catch(() => undefined),
+        new Promise<void>((resolve) => setTimeout(resolve, TERMINATE_GRACE_MS)),
+      ]);
+    })();
     await active.termination;
   }
 
@@ -333,6 +351,7 @@ export class PiInProcessBackend implements ExecutionBackend {
     context: BackendExecutionContext,
     executionError: unknown,
   ): BackendResult {
+    report.finishedAt = this.#now().toISOString();
     const output = latestProcessAssistantText(report.messages);
     const enforcement: EnforcementReceipt = {
       access: structuredClone(plan.preflight.access),

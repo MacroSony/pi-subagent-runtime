@@ -165,9 +165,10 @@ export function evaluateInProcessIntent(
       ),
     );
   }
-  const catalogNames = new Set(PI_INPROCESS_TOOL_CATALOG.map((tool) => tool.name));
+  const catalogNames = new Map(PI_INPROCESS_TOOL_CATALOG.map((tool) => [tool.name, tool]));
   for (const [index, requested] of intent.requestedTools.entries()) {
-    if (!catalogNames.has(requested)) {
+    const tool = catalogNames.get(requested);
+    if (!tool) {
       diagnostics.push(
         errorDiagnostic(
           `${codePrefix}.tool`,
@@ -175,6 +176,20 @@ export function evaluateInProcessIntent(
           `requestedTools[${index}]`,
         ),
       );
+      continue;
+    }
+    // Mirror the core tool-effect check so an accepted preflight is guaranteed
+    // to survive validateAcceptedPreflightAgainstIntent.
+    for (const effect of tool.effects) {
+      if (!accessAllowsEffect(access, effect)) {
+        diagnostics.push(
+          errorDiagnostic(
+            `${codePrefix}.tool-effect`,
+            `Tool ${requested} requires disallowed ${effect} access.`,
+            `requestedTools[${index}]`,
+          ),
+        );
+      }
     }
   }
   const model = modelRegistry.find(intent.model.provider, intent.model.id);
@@ -271,4 +286,22 @@ export function acceptedInProcessPreflight(input: {
     limits,
     diagnostics,
   };
+}
+
+function accessAllowsEffect(
+  access: ExecutionIntent["access"],
+  effect: string,
+): boolean {
+  switch (effect) {
+    case "filesystem-read":
+      return access.level !== "none";
+    case "filesystem-write":
+      return access.level === "workspace-write";
+    case "process":
+      return access.allowProcess === true;
+    case "network":
+      return access.network === "allow";
+    default:
+      return false;
+  }
 }
