@@ -56,6 +56,14 @@ export interface SdkPreparationGateOptions {
   cwd: string;
   now?: () => Date;
   tempDirPrefix?: string;
+  /**
+   * When true, the compiled conversation replaces the session context only on
+   * the first context event; later turns keep their accumulated messages.
+   * In-process backends need this to resume the parked session as the real
+   * execution (multi-turn). Fresh-process backends keep the default pinning
+   * behavior, which only ever fires once before the provider gate.
+   */
+  executablePreparations?: boolean;
 }
 
 /**
@@ -71,6 +79,7 @@ export class SdkPreparationGate {
   readonly #cwd: string;
   readonly #now: () => Date;
   readonly #tempDirPrefix: string;
+  readonly #executablePreparations: boolean;
   readonly #primed = new Map<string, PrimedPreparation>();
 
   constructor(options: SdkPreparationGateOptions) {
@@ -80,6 +89,7 @@ export class SdkPreparationGate {
     this.#cwd = options.cwd;
     this.#now = options.now ?? (() => new Date());
     this.#tempDirPrefix = options.tempDirPrefix ?? "pi-subagent-runtime-prepare-";
+    this.#executablePreparations = options.executablePreparations ?? false;
   }
 
   get(model: PrimedPreparation["preflightId"]): PrimedPreparation | undefined {
@@ -202,6 +212,20 @@ export class SdkPreparationGate {
     rmSync(primed.tempDir, { recursive: true, force: true });
   }
 
+  /**
+   * Hands ownership of a primed preparation to the caller without disposing
+   * anything. In-process backends use this to resume the parked session as the
+   * actual execution instead of replaying the sealed conversation elsewhere.
+   * After take(), the caller owns session disposal, the provider gate, the
+   * execution promise, and tempDir cleanup.
+   */
+  take(preflightId: string): PrimedPreparation | undefined {
+    const primed = this.#primed.get(preflightId);
+    if (!primed || primed.disposed) return undefined;
+    this.#primed.delete(preflightId);
+    return primed;
+  }
+
   async stopAll(): Promise<void> {
     for (const primed of [...this.#primed.values()]) await this.stop(primed);
   }
@@ -232,12 +256,18 @@ export class SdkPreparationGate {
           throw error;
         }
       });
+      let contextSeeded = false;
       pi.on("context", () => {
         if (!compiled) {
           throw new Error(
             "Pi context event arrived before host preparation.",
           );
         }
+        // Executable preparations seed the compiled conversation once, before
+        // the first (gated) provider request. Later turns must keep their
+        // accumulated assistant/tool messages or the agent loop would reset.
+        if (this.#executablePreparations && contextSeeded) return undefined;
+        contextSeeded = true;
         return {
           messages: compiled.messages.map((message, index) =>
             preparedMessageToAgentMessage(

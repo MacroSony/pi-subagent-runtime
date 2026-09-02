@@ -452,6 +452,60 @@ test("shared-user receipts do not claim isolation they lack", () => {
   );
 });
 
+test("shared-user boundary permits honest unisolated write and process access", () => {
+  const writeRequest = {
+    ...intent().access,
+    level: "workspace-write" as const,
+    workspaces: [{ handle: "workspace", mode: "read-write" as const }],
+    workingDirectory: { workspaceHandle: "workspace", path: "." },
+    allowProcess: true,
+    executionBoundary: "shared-user" as const,
+  };
+  const honestReceipt = {
+    ...preflight().access,
+    level: "workspace-write" as const,
+    mounts: [
+      {
+        workspaceHandle: "workspace",
+        mountId: "shared",
+        mode: "read-write" as const,
+      },
+    ],
+    workingDirectory: { mountId: "shared", path: "." },
+    process: true,
+    executionBoundary: "shared-user" as const,
+    enforcement: {
+      readOnlyMountIsolation: false,
+      readWriteMountIsolation: false,
+      symlinkSafeContainment: false,
+      processIsolation: false,
+      agentNetworkIsolation: false,
+    },
+  };
+  assert.deepEqual(validateAccessEnforcement(writeRequest, honestReceipt), []);
+
+  // The isolated boundary keeps the strict requirements.
+  const isolatedRequest = {
+    ...writeRequest,
+    executionBoundary: "isolated" as const,
+  };
+  const isolatedReceipt = {
+    ...honestReceipt,
+    executionBoundary: "isolated" as const,
+  };
+  const isolatedCodes = validateAccessEnforcement(
+    isolatedRequest,
+    isolatedReceipt,
+  ).map(({ code }) => code);
+  assert.ok(isolatedCodes.includes("preflight.write-isolation"));
+  assert.ok(isolatedCodes.includes("preflight.process-isolation"));
+
+  // A shared-user receipt must not claim isolation enforcement it lacks;
+  // descriptor validation rejects overstatement separately, and claiming
+  // enforcement here is still accepted shape-wise, so only the inverse
+  // direction (isolated boundary without enforcement) is a contract error.
+});
+
 test("sealed plans validate their bindings and both fingerprints", () => {
   const snapshot = plan();
   assert.deepEqual(validateSealedPlanSnapshot(snapshot), []);

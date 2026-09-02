@@ -949,7 +949,13 @@ export function validateAccessEnforcement(
       ),
     );
   }
+  // Isolation requirements attach to the "isolated" execution boundary only.
+  // A "shared-user" backend runs with the invoking user's privileges and must
+  // honestly report every isolation enforcement flag as false; requiring
+  // isolation there would make the shared-user boundary unusable for write or
+  // process access instead of honestly unsandboxed.
   if (
+    receipt.executionBoundary === "isolated" &&
     request.level === "workspace-write" &&
     (!receipt.enforcement.readWriteMountIsolation ||
       !receipt.enforcement.symlinkSafeContainment)
@@ -957,16 +963,20 @@ export function validateAccessEnforcement(
     diagnostics.push(
       error(
         "preflight.write-isolation",
-        "workspace-write requires write isolation and symlink-safe containment.",
+        "Isolated workspace-write requires write isolation and symlink-safe containment.",
         "access.enforcement",
       ),
     );
   }
-  if (request.allowProcess && !receipt.enforcement.processIsolation) {
+  if (
+    receipt.executionBoundary === "isolated" &&
+    request.allowProcess &&
+    !receipt.enforcement.processIsolation
+  ) {
     diagnostics.push(
       error(
         "preflight.process-isolation",
-        "Process access requires process isolation.",
+        "Isolated process access requires process isolation.",
         "access.enforcement.processIsolation",
       ),
     );
