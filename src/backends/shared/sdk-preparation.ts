@@ -39,6 +39,9 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 const PREPARATION_TRIGGER_PROMPT =
   "Prepare the subagent prompt runtime without contacting the provider.";
 
+/** Bounded wait for a stopped execution before cleanup proceeds anyway. */
+const STOP_GRACE_MS = 3_000;
+
 export interface PrimedPreparation {
   preflightId: string;
   runtime: PromptRuntime;
@@ -73,11 +76,12 @@ export interface SdkPreparationGateOptions {
   now?: () => Date;
   tempDirPrefix?: string;
   /**
-   * When true, the compiled conversation replaces the session context only on
-   * the first context event; later turns keep their accumulated messages.
-   * In-process backends need this to resume the parked session as the real
-   * execution (multi-turn). Fresh-process backends keep the default pinning
-   * behavior, which only ever fires once before the provider gate.
+   * When true, the compiled conversation replaces the preparation trigger on
+   * every context event, so multi-turn runs keep the sealed conversation
+   * alongside accumulated tool results. In-process backends need this to
+   * resume the parked session as the real execution (multi-turn).
+   * Fresh-process backends keep the default pinning behavior, which only
+   * ever fires once before the provider gate.
    */
   executablePreparations?: boolean;
 }
@@ -98,6 +102,7 @@ export class SdkPreparationGate {
   readonly #executablePreparations: boolean;
   readonly #primed = new Map<string, PrimedPreparation>();
   readonly #inFlight = new Set<InFlightPreparation>();
+  #closed = false;
 
   constructor(options: SdkPreparationGateOptions) {
     this.#modelRegistry = options.modelRegistry;
@@ -117,6 +122,11 @@ export class SdkPreparationGate {
     input: AcceptedPreparationInput,
     context: BackendPreparationContext,
   ): Promise<BackendPreparation> {
+    // After stopAll() no new preparation may begin; otherwise one could prime
+    // after disposal has already iterated the in-flight set.
+    if (this.#closed) {
+      throw new Error("Pi preparation gate is closed to new preparations.");
+    }
     if (this.#primed.has(input.preflight.preflightId)) {
       throw new Error(
         `Pi preparation gate already holds preflight: ${input.preflight.preflightId}`,
@@ -249,7 +259,12 @@ export class SdkPreparationGate {
     primed.providerGate.reject(
       new Error("Dry preparation completed without provider transport."),
     );
-    await primed.execution.catch(() => undefined);
+    // A resumed (in-process) execution may be stuck on a non-cooperative
+    // provider even after abort and transport-stop; never hang cleanup on it.
+    await Promise.race([
+      primed.execution.catch(() => undefined),
+      new Promise<void>((resolve) => setTimeout(resolve, STOP_GRACE_MS)),
+    ]);
     primed.session.dispose();
     rmSync(primed.tempDir, { recursive: true, force: true });
   }
@@ -262,6 +277,7 @@ export class SdkPreparationGate {
    * execution promise, and tempDir cleanup.
    */
   take(preflightId: string): PrimedPreparation | undefined {
+    if (this.#closed) return undefined;
     const primed = this.#primed.get(preflightId);
     if (!primed || primed.disposed) return undefined;
     this.#primed.delete(preflightId);
@@ -269,6 +285,8 @@ export class SdkPreparationGate {
   }
 
   async stopAll(): Promise<void> {
+    // Close the gate first so no new preparation can begin racing disposal.
+    this.#closed = true;
     // Cancel preparations that have not primed yet; they would otherwise
     // insert themselves into the primed map after stopAll() has iterated it.
     for (const record of [...this.#inFlight]) {

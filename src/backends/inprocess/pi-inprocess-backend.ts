@@ -20,7 +20,9 @@ import type {
   ExecutionBackend,
 } from "../../runtime/index.ts";
 import {
+  deferred,
   SdkPreparationGate,
+  type Deferred,
   type PrimedPreparation,
 } from "../shared/sdk-preparation.ts";
 import type { PiModelRegistry } from "../shared/pi-model-runtime.ts";
@@ -84,6 +86,8 @@ const TERMINATE_GRACE_MS = 3_000;
 
 interface ActiveInProcessRun {
   session: PrimedPreparation["session"];
+  /** Resolved when a bounded termination gives up waiting for the provider. */
+  forceSettle: Deferred<void>;
   terminationReason?: string;
   termination?: Promise<void>;
 }
@@ -215,34 +219,46 @@ export class PiInProcessBackend implements ExecutionBackend {
       throw error;
     }
 
-    const active: ActiveInProcessRun = { session: primed.session };
-    this.#active.set(plan.preparedRunId, active);
+    let unsubscribe: (() => void) | undefined;
+    try {
+      const active: ActiveInProcessRun = {
+        session: primed.session,
+        forceSettle: deferred<void>(),
+      };
+      this.#active.set(plan.preparedRunId, active);
 
-    const unsubscribe = primed.session.subscribe((event) => {
-      if (event.type !== "message_end") return;
-      const message = sanitizeSubprocessReportValue(event.message);
-      captureProcessAssistantReceipt(report, message);
-      appendProcessReportMessage(
-        report,
-        message,
-        sanitizeSubprocessReportValue,
-      );
-      if (isRecord(message) && message.role === "toolResult") {
-        context.emit({
-          phase: "tool-result",
-          message: processToolResultSummary(message),
-          details: processReportSummary(report),
-        });
-      } else {
-        context.emit({
-          phase: "message",
-          message:
-            latestProcessAssistantText(report.messages) ||
-            "Subagent completed a model turn.",
-          details: processReportSummary(report),
-        });
-      }
-    });
+      unsubscribe = primed.session.subscribe((event) => {
+        if (event.type !== "message_end") return;
+        const message = sanitizeSubprocessReportValue(event.message);
+        captureProcessAssistantReceipt(report, message);
+        appendProcessReportMessage(
+          report,
+          message,
+          sanitizeSubprocessReportValue,
+        );
+        if (isRecord(message) && message.role === "toolResult") {
+          context.emit({
+            phase: "tool-result",
+            message: processToolResultSummary(message),
+            details: processReportSummary(report),
+          });
+        } else {
+          context.emit({
+            phase: "message",
+            message:
+              latestProcessAssistantText(report.messages) ||
+              "Subagent completed a model turn.",
+            details: processReportSummary(report),
+          });
+        }
+      });
+    } catch (error) {
+      // Ownership already transferred: clean up here, because discard() can no
+      // longer see this preparation in the gate.
+      await this.#cleanupRun(plan.preparedRunId, primed);
+      throw error;
+    }
+    const active = this.#active.get(plan.preparedRunId)!;
 
     const abort = () => {
       void this.#terminateRun(plan.preparedRunId, abortReason(context.signal));
@@ -256,12 +272,14 @@ export class PiInProcessBackend implements ExecutionBackend {
         // Release the parked provider request; the sealed conversation now
         // executes in this process against the host model runtime.
         primed.providerGate.resolve();
-        await primed.execution;
+        // A non-cooperative provider may ignore abort; a bounded termination
+        // resolves forceSettle so this run still reaches a terminal result.
+        await Promise.race([primed.execution, active.forceSettle.promise]);
       } catch (error) {
         executionError = error;
       } finally {
         context.signal.removeEventListener("abort", abort);
-        unsubscribe();
+        unsubscribe?.();
         await this.#cleanupRun(plan.preparedRunId, primed);
       }
       return this.#terminalResult(plan, report, active, context, executionError);
@@ -330,6 +348,9 @@ export class PiInProcessBackend implements ExecutionBackend {
         active.session.abort().catch(() => undefined),
         new Promise<void>((resolve) => setTimeout(resolve, TERMINATE_GRACE_MS)),
       ]);
+      // The provider did not cooperate within the grace period; release the
+      // result promise so the run can still settle as terminated.
+      active.forceSettle.resolve();
     })();
     await active.termination;
   }
@@ -339,9 +360,9 @@ export class PiInProcessBackend implements ExecutionBackend {
     primed: PrimedPreparation,
   ): Promise<void> {
     this.#active.delete(preparedRunId);
-    primed.disposed = true;
-    primed.session.dispose();
-    rmSync(primed.tempDir, { recursive: true, force: true });
+    // Delegate to the gate so the parked execution settles (provider gate
+    // rejected, transport stopped) instead of leaking a pending promise.
+    await this.#preparations.stop(primed);
   }
 
   #terminalResult(
