@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [0.1.0-beta.4] - 2026-09-03
 
 ### Added
 
@@ -13,8 +13,23 @@ All notable changes to this project will be documented in this file.
   only — a same-process policy boundary with no OS isolation, reported
   honestly in the access receipt.
 - `SdkPreparationGate.take()` hands a primed preparation to in-process
-  backends without disposing it, and `executablePreparations` seeds the
-  compiled conversation once instead of pinning every turn.
+  backends without disposing it; `executablePreparations` splices the
+  compiled conversation over the preparation trigger on every provider
+  request, so multi-turn runs keep the sealed conversation alongside
+  accumulated tool results.
+
+### Fixed
+
+- Block provider transport in the stream path itself: the Pi event runner
+  swallows extension-hook errors, so a rejected preparation gate alone could
+  not stop a provider call.
+- Track in-flight preparations so dispose cannot orphan a session, and refuse
+  new preparations after `stopAll()` so disposal cannot be raced.
+- Bound cancellation, disposal, and gate cleanup so a provider that ignores
+  abort cannot hang the run result or the backend.
+- Set run-report `finishedAt`, clean up preparations taken by an in-process
+  run whose setup fails, and check tool effects at preflight so accepted
+  preflights survive core validation.
 
 ### Changed
 
