@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## Unreleased
+
+- Preserve optional cache-token breakdown, native cost components and receipt
+  coverage in `RunUsage`. Legacy/custom summaries remain valid; incomplete
+  coverage must not be promoted to complete Pi usage. See `RUNTIME-USAGE.md`.
+- Preserve validated partial usage when the host cancels/times out execution or
+  cleanup fails, without overriding host-owned status or enforcement.
+
 ## [0.1.0-beta.4] - 2026-09-03
 
 ### Added

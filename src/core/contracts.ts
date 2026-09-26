@@ -313,14 +313,39 @@ export interface EnforcementReceipt {
 
 export interface RunUsage {
   tokens?: {
+    /** Uncached input tokens, matching Pi's Usage.input meaning. */
     input: number;
     output: number;
     total: number;
+    /** Exact subtotal for receipts with known cache fields. */
+    cacheRead?: number;
+    /** Exact subtotal for receipts with known cache fields. */
+    cacheWrite?: number;
     tokenizer?: string;
   };
+  /**
+   * Provider requests represented by this usage. Older/custom producers may
+   * omit this metadata; consumers must then treat request/cache coverage as
+   * unknown rather than infer it from token zeros.
+   */
+  requests?: {
+    total: number;
+    /** Receipts with valid input/output and paired cacheRead/cacheWrite counts. */
+    cacheKnown: number;
+    /** Requests with complete native-compatible token and cost usage. */
+    usageKnown?: number;
+  };
   cost?: {
+    /** Aggregate cost, retained for compatibility with legacy producers. */
     amount: number;
     currency: string;
+    /** Exact component subtotals for usageKnown receipts; may be partial. */
+    breakdown?: {
+      input: number;
+      output: number;
+      cacheRead: number;
+      cacheWrite: number;
+    };
   };
 }
 

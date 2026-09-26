@@ -124,6 +124,18 @@ test("subprocess backend prepares through the parent model runtime, executes a f
     assert.equal(result.output.text, "Fixture subprocess complete.");
     assert.equal(result.output.partial, false);
     assert.equal(result.usage?.tokens?.total, 15);
+    assert.deepEqual(result.usage?.requests, {
+      total: 1,
+      cacheKnown: 1,
+      usageKnown: 1,
+    });
+    assert.deepEqual(
+      {
+        cacheRead: result.usage?.tokens?.cacheRead,
+        cacheWrite: result.usage?.tokens?.cacheWrite,
+      },
+      { cacheRead: 0, cacheWrite: 0 },
+    );
     assert.equal(providerContexts.length, 0);
     assert.equal(invocationArgs.length, 1);
     assertContainsFlag(invocationArgs[0]!, "--tools", "read,grep,find,ls");

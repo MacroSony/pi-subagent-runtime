@@ -2994,21 +2994,75 @@ function validateUsage(
         ),
       );
     }
+    const tokens = isRecord(value.tokens) ? value.tokens : undefined;
+    const hasCacheRead = tokens?.cacheRead !== undefined;
+    const hasCacheWrite = tokens?.cacheWrite !== undefined;
+    if (
+      tokens &&
+      (hasCacheRead !== hasCacheWrite ||
+        (hasCacheRead &&
+          (!isNonNegativeInteger(tokens.cacheRead) ||
+            !isNonNegativeInteger(tokens.cacheWrite))))
+    ) {
+      diagnostics.push(
+        error(
+          "usage.cache",
+          "cacheRead and cacheWrite must be paired non-negative integers.",
+          `${path}.tokens`,
+        ),
+      );
+    }
   }
-  if (
-    value.cost !== undefined &&
-    (!isRecord(value.cost) ||
+  if (value.requests !== undefined) {
+    if (
+      !isRecord(value.requests) ||
+      !isNonNegativeInteger(value.requests.total) ||
+      !isNonNegativeInteger(value.requests.cacheKnown) ||
+      (value.requests.usageKnown !== undefined &&
+        !isNonNegativeInteger(value.requests.usageKnown)) ||
+      value.requests.cacheKnown > value.requests.total ||
+      (value.requests.usageKnown !== undefined &&
+        value.requests.usageKnown > value.requests.total)
+    ) {
+      diagnostics.push(
+        error(
+          "usage.requests",
+          "Request coverage requires non-negative counts with cacheKnown and usageKnown no greater than total.",
+          `${path}.requests`,
+        ),
+      );
+    }
+  }
+  if (value.cost !== undefined) {
+    if (
+      !isRecord(value.cost) ||
       !isNonNegativeFinite(value.cost.amount) ||
       typeof value.cost.currency !== "string" ||
-      !/^[A-Z]{3}$/.test(value.cost.currency))
-  ) {
-    diagnostics.push(
-      error(
-        "usage.cost",
-        "Cost requires a non-negative amount and ISO 4217 currency code.",
-        `${path}.cost`,
-      ),
-    );
+      !/^[A-Z]{3}$/.test(value.cost.currency)
+    ) {
+      diagnostics.push(
+        error(
+          "usage.cost",
+          "Cost requires a non-negative amount and ISO 4217 currency code.",
+          `${path}.cost`,
+        ),
+      );
+    } else if (
+      value.cost.breakdown !== undefined &&
+      (!isRecord(value.cost.breakdown) ||
+        !isNonNegativeFinite(value.cost.breakdown.input) ||
+        !isNonNegativeFinite(value.cost.breakdown.output) ||
+        !isNonNegativeFinite(value.cost.breakdown.cacheRead) ||
+        !isNonNegativeFinite(value.cost.breakdown.cacheWrite))
+    ) {
+      diagnostics.push(
+        error(
+          "usage.cost-breakdown",
+          "Cost breakdown requires finite non-negative input, output, cacheRead, and cacheWrite values.",
+          `${path}.cost.breakdown`,
+        ),
+      );
+    }
   }
 }
 

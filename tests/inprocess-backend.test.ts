@@ -139,6 +139,12 @@ test("in-process backend resumes the primed session against an extension-registe
     assert.equal(report.executionBoundary, "shared-user");
     assert.equal(report.executionFingerprint, plan.executionFingerprint);
     assert.equal(report.usage.turns, 1);
+    assert.equal(report.usage.cacheKnownTurns, 1);
+    assert.deepEqual(result.usage?.requests, {
+      total: 1,
+      cacheKnown: 1,
+      usageKnown: 1,
+    });
     assert.equal(backend.takeReport(prepared.id), undefined);
   } finally {
     await runtime.dispose();

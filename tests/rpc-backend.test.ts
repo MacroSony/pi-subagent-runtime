@@ -71,6 +71,18 @@ test("RPC backend sends the marker over JSONL, streams events, and settles with 
     if (result.status !== "completed") return;
     assert.equal(result.output.text, "Fixture RPC complete.");
     assert.equal(result.usage?.tokens?.total, 15);
+    assert.deepEqual(result.usage?.requests, {
+      total: 1,
+      cacheKnown: 1,
+      usageKnown: 1,
+    });
+    assert.deepEqual(
+      {
+        cacheRead: result.usage?.tokens?.cacheRead,
+        cacheWrite: result.usage?.tokens?.cacheWrite,
+      },
+      { cacheRead: 0, cacheWrite: 0 },
+    );
     assert.equal(providerContexts.length, 0);
     assert.equal(invocationArgs.length, 1);
     assertContainsFlag(invocationArgs[0]!, "--mode", "rpc");

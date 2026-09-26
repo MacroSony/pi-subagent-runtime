@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   createExecutionRuntime,
   ExecutionRuntimeError,
+  type BackendResult,
   type ExecutionBackend,
   type ExecutionRuntime,
   type PrepareRequest,
@@ -41,6 +42,24 @@ function request(
 function runtimeError(code: string): (error: unknown) => boolean {
   return (error) =>
     error instanceof ExecutionRuntimeError && error.code === code;
+}
+
+function backendWithUsage(
+  backend: DeterministicFakeBackend,
+  usage: unknown,
+): DeterministicFakeBackend {
+  const start = backend.start.bind(backend);
+  backend.start = (input, context) => {
+    const execution = start(input, context);
+    return {
+      ...execution,
+      result: execution.result.then((result) => ({
+        ...result,
+        usage,
+      } as BackendResult)),
+    };
+  };
+  return backend;
 }
 
 async function waitFor(
@@ -498,6 +517,124 @@ test("cancellation wins a pending backend result and drains cleanup once", async
   assert.equal(backend.executionDisposeCalls.length, 1);
   await run.cancel("again");
   assert.equal(backend.cancelCalls.length, 1);
+  await runtime.dispose();
+});
+
+test("host cancellation preserves only validated backend usage", async () => {
+  const runtime = deterministicRuntime();
+  const usage = {
+    tokens: { input: 7, output: 3, total: 10 },
+  };
+  const backend = backendWithUsage(
+    new DeterministicFakeBackend(),
+    usage,
+  );
+  backend.executionMode = "delayed";
+  runtime.registerBackend(backend);
+  const run = runtime.execute(await runtime.prepare(request(backend)));
+  await backend.waitForStart();
+
+  const cancellation = run.cancel("stop after partial receipt");
+  await waitFor(() => backend.cancelCalls.length === 1);
+  backend.releaseNextExecution();
+  await cancellation;
+
+  const result = await run.result;
+  assert.equal(result.status, "cancelled");
+  assert.deepEqual(result.usage, usage);
+  assert.equal("output" in result, false);
+  await runtime.dispose();
+});
+
+test("host timeout preserves validated backend usage while retaining timeout authority", async () => {
+  const runtime = deterministicRuntime();
+  const usage = {
+    tokens: { input: 5, output: 2, total: 7 },
+  };
+  const backend = backendWithUsage(
+    new DeterministicFakeBackend({
+      limitEnforcement: { timeoutMs: "host-abort" },
+    }),
+    usage,
+  );
+  backend.executionMode = "delayed";
+  runtime.registerBackend(backend);
+  const prepared = await runtime.prepare(request(backend, {
+    intent: fakeExecutionIntent({
+      limits: { timeoutMs: { value: 20, enforcement: "best-effort" } },
+    }),
+  }));
+  const run = runtime.execute(prepared);
+  await backend.waitForStart();
+  await waitFor(() => backend.cancelCalls.length === 1);
+  backend.releaseNextExecution();
+
+  const result = await run.result;
+  assert.equal(result.status, "timed-out");
+  if (result.status === "timed-out") {
+    assert.equal(result.enforcedTimeoutMs, 20);
+    assert.equal(result.reason, "host timeout");
+    assert.deepEqual(result.usage, usage);
+  }
+  assert.equal("output" in result, false);
+  await runtime.dispose();
+});
+
+test("cancelled results reject malformed or unavailable backend usage", async () => {
+  const invalidRuntime = deterministicRuntime();
+  const invalidBackend = backendWithUsage(
+    new DeterministicFakeBackend(),
+    { tokens: { input: "bad", output: 1, total: 2 } },
+  );
+  invalidBackend.executionMode = "delayed";
+  invalidRuntime.registerBackend(invalidBackend);
+  const invalidRun = invalidRuntime.execute(
+    await invalidRuntime.prepare(request(invalidBackend)),
+  );
+  await invalidBackend.waitForStart();
+  const invalidCancellation = invalidRun.cancel("invalid receipt");
+  await waitFor(() => invalidBackend.cancelCalls.length === 1);
+  invalidBackend.releaseNextExecution();
+  await invalidCancellation;
+  assert.equal((await invalidRun.result).usage, undefined);
+  await invalidRuntime.dispose();
+
+  const noResultRuntime = deterministicRuntime();
+  const noResultBackend = new DeterministicFakeBackend();
+  noResultBackend.executionMode = "throw-result";
+  noResultRuntime.registerBackend(noResultBackend);
+  const noResultRun = noResultRuntime.execute(
+    await noResultRuntime.prepare(request(noResultBackend)),
+  );
+  await noResultBackend.waitForStart();
+  await noResultRun.cancel("no terminal receipt");
+  const noResult = await noResultRun.result;
+  assert.equal(noResult.status, "cancelled");
+  assert.equal(noResult.usage, undefined);
+  await noResultRuntime.dispose();
+});
+
+test("cleanup failure retains validated usage without adopting backend result fields", async () => {
+  const runtime = deterministicRuntime();
+  const usage = {
+    tokens: { input: 6, output: 1, total: 7 },
+  };
+  const backend = backendWithUsage(
+    new DeterministicFakeBackend(),
+    usage,
+  );
+  backend.executionMode = "cleanup-throw";
+  runtime.registerBackend(backend);
+
+  const result = await runtime.execute(
+    await runtime.prepare(request(backend)),
+  ).result;
+  assert.equal(result.status, "failed");
+  if (result.status === "failed") {
+    assert.equal(result.error.code, "execution.cleanup-error");
+    assert.deepEqual(result.usage, usage);
+    assert.equal("output" in result, false);
+  }
   await runtime.dispose();
 });
 

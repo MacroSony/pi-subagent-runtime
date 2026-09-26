@@ -529,6 +529,43 @@ test("terminal results validate structure and plan binding", () => {
   const completed = result(snapshot);
   assert.deepEqual(validateRunResult(completed, snapshot), []);
 
+  const withCoverage = {
+    ...completed,
+    usage: {
+      tokens: {
+        input: 10,
+        output: 5,
+        total: 20,
+        cacheRead: 4,
+        cacheWrite: 1,
+      },
+      requests: { total: 2, cacheKnown: 2, usageKnown: 2 },
+      cost: {
+        amount: 0,
+        currency: "USD",
+        breakdown: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      },
+    },
+  };
+  assert.deepEqual(validateRunResult(withCoverage, snapshot), []);
+  assert.ok(
+    validateRunResult(
+      {
+        ...completed,
+        usage: {
+          tokens: { input: 10, output: 5, total: 15, cacheRead: 4 },
+          requests: { total: 1, cacheKnown: 2, usageKnown: 2 },
+          cost: {
+            amount: 1,
+            currency: "USD",
+            breakdown: { input: -1, output: 0, cacheRead: 0, cacheWrite: 0 },
+          },
+        },
+      },
+      snapshot,
+    ).some(({ code }) => code === "usage.cache" || code === "usage.requests"),
+  );
+
   const forged = {
     ...completed,
     executionFingerprint: fingerprint("other"),

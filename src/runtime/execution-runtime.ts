@@ -705,6 +705,7 @@ class ExecutionRuntimeImpl implements ExecutionRuntime {
   async #dispatch(run: RunRecord): Promise<void> {
     const { prepared } = run;
     let candidate: RunResult | undefined;
+    let backendResult: BackendResult | undefined;
     let cleanupError: unknown;
     let preparationDiscardInvoked = false;
     let preparationDiscardError: unknown;
@@ -749,7 +750,6 @@ class ExecutionRuntimeImpl implements ExecutionRuntime {
         if (!run.cancellation) run.state = "running";
         else this.#requestBackendCancellation(run);
 
-        let backendResult: BackendResult | undefined;
         try {
           backendResult = await execution.result;
         } catch (cause) {
@@ -765,7 +765,7 @@ class ExecutionRuntimeImpl implements ExecutionRuntime {
         run.backendSettled = true;
         this.#clearTimeout(run);
         candidate = run.cancellation
-          ? this.#cancellationResult(run)
+          ? this.#cancellationResult(run, backendResult)
           : backendResult
             ? this.#normalizeBackendResult(run, backendResult)
             : this.#failureResult(
@@ -778,7 +778,7 @@ class ExecutionRuntimeImpl implements ExecutionRuntime {
       run.backendSettled = true;
       this.#clearTimeout(run);
       candidate = run.cancellation
-        ? this.#cancellationResult(run)
+        ? this.#cancellationResult(run, backendResult)
         : this.#failureResult(
             run,
             cause instanceof ExecutionRuntimeError
@@ -812,11 +812,17 @@ class ExecutionRuntimeImpl implements ExecutionRuntime {
 
     cleanupError ??= preparationDiscardError;
     if (cleanupError) {
-      candidate = this.#failureResult(
+      const cleanupFailure = this.#failureResult(
         run,
         "execution.cleanup-error",
         `Backend execution cleanup failed: ${errorMessage(cleanupError)}`,
       );
+      candidate = candidate?.usage === undefined
+        ? cleanupFailure
+        : {
+            ...cleanupFailure,
+            usage: structuredClone(candidate.usage),
+          };
     }
     this.#settle(run, candidate ?? this.#failureResult(
       run,
@@ -829,22 +835,27 @@ class ExecutionRuntimeImpl implements ExecutionRuntime {
     run: RunRecord,
     backendResult: BackendResult,
   ): RunResult {
+    const normalized = this.#validatedBackendResult(run, backendResult);
+    if (normalized.result) return normalized.result;
+    return this.#failureResult(
+      run,
+      "execution.invalid-result",
+      normalized.errorMessage ?? "Backend returned an invalid terminal result.",
+    );
+  }
+
+  #validatedBackendResult(
+    run: RunRecord,
+    backendResult: BackendResult,
+  ): { result?: RunResult; errorMessage?: string } {
     let value: unknown;
     try {
       value = structuredClone(backendResult);
     } catch {
-      return this.#failureResult(
-        run,
-        "execution.invalid-result",
-        "Backend result is not structured-cloneable.",
-      );
+      return { errorMessage: "Backend result is not structured-cloneable." };
     }
     if (!value || typeof value !== "object" || Array.isArray(value)) {
-      return this.#failureResult(
-        run,
-        "execution.invalid-result",
-        "Backend returned a malformed terminal result.",
-      );
+      return { errorMessage: "Backend returned a malformed terminal result." };
     }
     const candidate = {
       ...(value as Record<string, unknown>),
@@ -853,24 +864,30 @@ class ExecutionRuntimeImpl implements ExecutionRuntime {
     const diagnostics = validateRunResult(candidate, run.prepared.plan);
     diagnostics.push(...validateBackendTerminalLimit(candidate, run.prepared.plan));
     if (hasErrors(diagnostics)) {
-      return this.#failureResult(
-        run,
-        "execution.invalid-result",
-        summarizeDiagnostics(diagnostics),
-      );
+      return { errorMessage: summarizeDiagnostics(diagnostics) };
     }
-    return candidate;
+    return { result: candidate };
   }
 
-  #cancellationResult(run: RunRecord): RunResult {
+  #cancellationResult(
+    run: RunRecord,
+    backendResult?: BackendResult,
+  ): RunResult {
     const cancellation = run.cancellation ?? {
       kind: "cancelled" as const,
       reason: "cancelled",
     };
+    const usage = backendResult === undefined
+      ? undefined
+      : this.#validatedBackendResult(run, backendResult).result?.usage;
+    const usageReceipt = usage === undefined
+      ? {}
+      : { usage: structuredClone(usage) };
     if (cancellation.kind === "timed-out") {
       const timeout = run.prepared.plan.preflight.limits.timeoutMs;
       return {
         ...this.#resultCommon(run),
+        ...usageReceipt,
         status: "timed-out",
         reason: cancellation.reason,
         enforcedTimeoutMs: timeout?.value ?? 1,
@@ -878,6 +895,7 @@ class ExecutionRuntimeImpl implements ExecutionRuntime {
     }
     return {
       ...this.#resultCommon(run),
+      ...usageReceipt,
       status: "cancelled",
       reason: cancellation.reason,
     };

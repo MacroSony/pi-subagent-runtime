@@ -74,6 +74,7 @@
     "examples/independent-host/",
     "README.md",
     "architecture.md",
+    "RUNTIME-USAGE.md",
     "CHANGELOG.md",
     "VISION.md",
     "LICENSE*"
