@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+- Add opt-in, bounded, same-process in-memory continuation on the in-process
+  backend only. Fresh preflight/approval seals the full original context plus
+  one new task; original SDK session/tool history is retained without summaries.
+  Model/tools/prompt/access binding changes require a new child. Other backends
+  reject continuation explicitly. Automatic compaction is disabled for retained
+  children using an in-memory override, not user settings writes.
+- Add explicit continuation release, prepare/discard reservations, and runtime-
+  owned backend cleanup. Retained contexts expire with their runtime instance;
+  there is no disk recovery or cross-session fork. Failed cleanup is retryable,
+  and cancellation races release otherwise-unreachable retained children.
+
 - Preserve optional cache-token breakdown, native cost components and receipt
   coverage in `RunUsage`. Legacy/custom summaries remain valid; incomplete
   coverage must not be promoted to complete Pi usage. See `RUNTIME-USAGE.md`.

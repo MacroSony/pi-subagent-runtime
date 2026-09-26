@@ -117,6 +117,29 @@ export function validateExecutionIntent(value: unknown): Diagnostic[] {
     }
   }
 
+  if (value.continuation !== undefined) {
+    if (!isRecord(value.continuation) || value.continuation.retain !== true) {
+      diagnostics.push(
+        error(
+          "intent.continuation",
+          "continuation must be { retain: true } with an optional id.",
+          "continuation",
+        ),
+      );
+    } else if (
+      value.continuation.id !== undefined &&
+      (typeof value.continuation.id !== "string" || !OPAQUE_ID_PATTERN.test(value.continuation.id))
+    ) {
+      diagnostics.push(
+        error(
+          "intent.continuation-id",
+          "continuation.id must be an opaque runtime-local identifier.",
+          "continuation.id",
+        ),
+      );
+    }
+  }
+
   if (value.provenance !== undefined) {
     if (!isRecord(value.provenance)) {
       diagnostics.push(
@@ -1365,6 +1388,25 @@ export function validateRunResult(
       diagnostics,
     );
   }
+  if (
+    value.continuationId !== undefined &&
+    (typeof value.continuationId !== "string" ||
+      !OPAQUE_ID_PATTERN.test(value.continuationId))
+  ) {
+    diagnostics.push(
+      error(
+        "result.continuation-id",
+        "continuationId must be an opaque runtime-local identifier.",
+        "continuationId",
+      ),
+    );
+  }
+
+  if (value.continuationId !== undefined &&
+      (value.status !== "completed" || (plan !== undefined &&
+        (plan.intent.continuation?.retain !== true || plan.preflight.backend.capabilities.continuation !== true)))) {
+    diagnostics.push(error("result.continuation-unexpected", "Only an opted-in successful continuation backend may retain a child.", "continuationId"));
+  }
 
   switch (value.status) {
     case "completed":
@@ -2070,6 +2112,18 @@ function validateBackendDescriptorAt(
         "backend.remote-transport",
         "remoteTransport must be boolean.",
         `${path}.capabilities.remoteTransport`,
+      ),
+    );
+  }
+  if (
+    capabilities.continuation !== undefined &&
+    typeof capabilities.continuation !== "boolean"
+  ) {
+    diagnostics.push(
+      error(
+        "backend.continuation",
+        "continuation must be boolean when advertised.",
+        `${path}.capabilities.continuation`,
       ),
     );
   }

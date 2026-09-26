@@ -139,6 +139,41 @@ The runtime can detect mutation of its sealed plan and inconsistent receipts.
 It cannot prove that a malicious backend sent the same content to a provider,
 so backend trust remains explicit.
 
+## Simple in-process continuation
+
+Only `PiInProcessBackend` advertises continuation. Opt in on the first intent with
+`continuation: { retain: true }`; a successful result returns an opaque
+`continuationId`. The next intent uses `continuation: { retain: true, id }` and its
+compiler receives a third `continuation.history` argument containing the complete
+approved history. Return that history plus exactly one new user task. Preparation
+seals and approves that full conversation before the same in-memory `AgentSession`
+is allowed a second provider request:
+
+```ts
+const first = await runtime.prepare({ ...request, intent: { ...intent,
+  continuation: { retain: true },
+} });
+const firstResult = await runtime.execute(first).result;
+if (firstResult.status === "completed" && firstResult.continuationId) {
+  const next = await runtime.prepare({
+    ...request,
+    intent: { ...intent, continuation: { retain: true, id: firstResult.continuationId } },
+    compile: async (runtime, preflight, continuation) => ({
+      systemPrompt: continuation!.history.systemPrompt,
+      messages: [...continuation!.history.messages, {
+        role: "user", content: [{ type: "text", text: "The next task" }],
+      }],
+    }),
+  });
+  await runtime.execute(next).result;
+  await runtime.releaseContinuation(firstResult.continuationId);
+}
+```
+
+This is memory-only and local to the backend instance. It does not support restart
+recovery, changed model/profile/system/tools/cwd, fork/steer, concurrent turns, or
+process backends. Unsupported backends reject the intent before provider transport.
+
 ## Built-in backends
 
 The first backend, available at

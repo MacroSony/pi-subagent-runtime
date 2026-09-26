@@ -1,12 +1,15 @@
-import { rmSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import {
   canonicalJson,
+  fingerprint,
   type BackendDescriptor,
   type BackendPreflightResult,
   type EnforcementReceipt,
   type SealedPlanSnapshot,
+  type PreparedConversation,
+  type PreparedMessage,
+  type PromptRuntime,
 } from "../../core/index.ts";
 import type {
   AcceptedPreparationInput,
@@ -68,6 +71,7 @@ export const PI_INPROCESS_BACKEND_DESCRIPTOR: BackendDescriptor = {
     mediaMimeTypes: [],
     remoteTransport: true,
     promptRuntimeFidelity: "backend-assisted",
+    continuation: true,
   },
 };
 
@@ -80,12 +84,30 @@ export interface PiInProcessBackendOptions {
   now?: () => Date;
   idFactory?: () => string;
   tempDirPrefix?: string;
+  /** Maximum number of retained in-memory child sessions. */
+  maxRetainedContinuations?: number;
 }
 
 const TERMINATE_GRACE_MS = 3_000;
 
+interface RetainedContinuation {
+  id: string;
+  primed: PrimedPreparation;
+  binding: string;
+  runtime: PromptRuntime;
+  conversation: PreparedConversation;
+  reservedBy: string | undefined;
+}
+
+interface ContinuationPreparation {
+  kind: "continuation";
+  retained: RetainedContinuation;
+  task: string;
+}
+
 interface ActiveInProcessRun {
   session: PrimedPreparation["session"];
+  retained?: RetainedContinuation;
   /** Resolved when a bounded termination gives up waiting for the provider. */
   forceSettle: Deferred<void>;
   terminationReason?: string;
@@ -109,6 +131,10 @@ export class PiInProcessBackend implements ExecutionBackend {
   #idFactory: () => string;
   #active = new Map<string, ActiveInProcessRun>();
   #reports = new Map<string, ProcessRunReport>();
+  #retained = new Map<string, RetainedContinuation>();
+  /** Reservations made by accepted first-run retain intents. */
+  #retentionReservations = new Set<string>();
+  #maxRetained: number;
 
   constructor(options: PiInProcessBackendOptions) {
     this.#modelRegistry = options.modelRegistry;
@@ -125,6 +151,10 @@ export class PiInProcessBackend implements ExecutionBackend {
     this.#now = options.now ?? (() => new Date());
     this.#idFactory =
       options.idFactory ?? (() => `pi-inprocess-preflight:${randomUUID()}`);
+    this.#maxRetained = options.maxRetainedContinuations ?? 8;
+    if (!Number.isInteger(this.#maxRetained) || this.#maxRetained < 1) {
+      throw new Error("maxRetainedContinuations must be a positive integer.");
+    }
   }
 
   preflight(input: BackendPreflightInput): BackendPreflightResult {
@@ -134,6 +164,51 @@ export class PiInProcessBackend implements ExecutionBackend {
       PI_INPROCESS_BACKEND_ID,
     );
     const preflightId = this.#idFactory();
+    if (
+      input.intent.continuation?.id !== undefined &&
+      !this.#retained.has(input.intent.continuation.id)
+    ) {
+      diagnostics.push({
+        level: "error",
+        code: "pi-inprocess.continuation-missing",
+        message: "The continuation handle is unknown to this backend instance.",
+        path: "continuation.id",
+      });
+    }
+    const retained = input.intent.continuation?.id
+      ? this.#retained.get(input.intent.continuation.id)
+      : undefined;
+    if (
+      input.intent.continuation?.id === undefined &&
+      input.intent.continuation?.retain === true &&
+      this.#retained.size + this.#retentionReservations.size >= this.#maxRetained
+    ) {
+      diagnostics.push({
+        level: "error",
+        code: "pi-inprocess.continuation-limit",
+        message: "The in-process continuation retention limit is full.",
+        path: "continuation",
+      });
+    }
+    if (retained?.reservedBy !== undefined) {
+      diagnostics.push({
+        level: "error",
+        code: "pi-inprocess.continuation-busy",
+        message: "The retained child already has a prepared or executing turn.",
+        path: "continuation.id",
+      });
+    }
+    if (
+      retained &&
+      retained.binding !== continuationBinding(input.intent)
+    ) {
+      diagnostics.push({
+        level: "error",
+        code: "pi-inprocess.continuation-binding",
+        message: "Continuation configuration changed; prepare a new child.",
+        path: "continuation",
+      });
+    }
     if (
       diagnostics.some((diagnostic) => diagnostic.level === "error") ||
       !model
@@ -145,7 +220,7 @@ export class PiInProcessBackend implements ExecutionBackend {
         diagnostics,
       };
     }
-    return acceptedInProcessPreflight({
+    const accepted = acceptedInProcessPreflight({
       descriptor: this.descriptor,
       preflightId,
       intent: input.intent,
@@ -153,13 +228,54 @@ export class PiInProcessBackend implements ExecutionBackend {
       diagnostics,
       codePrefix: PI_INPROCESS_BACKEND_ID,
     });
+    if (
+      accepted.status === "accepted" &&
+      input.intent.continuation?.id === undefined &&
+      input.intent.continuation?.retain === true
+    ) {
+      // This reservation is made before SDK preparation/provider dispatch. It
+      // prevents concurrent retained first runs from all doing expensive work
+      // and then discovering that only one handle fits the bound.
+      this.#retentionReservations.add(preflightId);
+    }
+    return accepted;
   }
 
   async prepare(
     input: AcceptedPreparationInput,
     context: BackendPreparationContext,
   ): Promise<BackendPreparation> {
-    return this.#preparations.prepare(input, context);
+    const continuationId = input.intent.continuation?.id;
+    if (!continuationId) {
+      try {
+        return await this.#preparations.prepare(input, context);
+      } catch (error) {
+        this.#releaseRetentionReservation(input.preflight.preflightId);
+        throw error;
+      }
+    }
+    const retained = this.#retained.get(continuationId);
+    if (!retained || (retained.reservedBy !== undefined && retained.reservedBy !== input.preflight.preflightId)) {
+      throw new Error("Continuation is already locked by another turn.");
+    }
+    retained.reservedBy = input.preflight.preflightId;
+    try {
+      const history = retainedHistory(retained);
+      const conversation = await context.compile(
+        structuredClone(retained.runtime),
+        { history: structuredClone(history) },
+      );
+      const task = appendedContinuationTask(history, conversation);
+      return {
+        runtime: structuredClone(retained.runtime),
+        conversation,
+        state: { kind: "continuation", retained, task } satisfies ContinuationPreparation,
+      };
+    } catch (error) {
+      retained.reservedBy = undefined;
+      this.#releaseRetentionReservation(input.preflight.preflightId);
+      throw error;
+    }
   }
 
   async start(
@@ -167,26 +283,43 @@ export class PiInProcessBackend implements ExecutionBackend {
     context: BackendExecutionContext,
   ): Promise<BackendExecution> {
     const { plan } = input;
-    const primedState = input.preparation.state as PrimedPreparation | undefined;
-    const primed =
-      primedState && this.#preparations.get(plan.preflightId) === primedState
-        ? primedState
+    const state = input.preparation.state as
+      | PrimedPreparation
+      | ContinuationPreparation
+      | undefined;
+    const continuation =
+      state && typeof state === "object" && "kind" in state &&
+      state.kind === "continuation"
+        ? state
+        : undefined;
+    const primed = continuation
+      ? continuation.retained.primed
+      : state && this.#preparations.get(plan.preflightId) === state
+        ? state
         : undefined;
     if (!primed) {
       throw new Error("Pi in-process execution has no matching prepared plan.");
     }
-    if (
-      canonicalJson(primed.runtime) !== canonicalJson(plan.promptRuntime) ||
-      canonicalJson(primed.conversation) !== canonicalJson(plan.conversation)
-    ) {
-      await this.#preparations.stop(primed);
+    if (canonicalJson(primed.runtime) !== canonicalJson(plan.promptRuntime)) {
+      if (continuation) await this.#stopRetained(continuation.retained);
+      else await this.#preparations.stop(primed);
+      this.#releaseRetentionReservation(plan.preflightId);
       throw new Error(
         "Pi in-process execution plan does not match its prepared prompt.",
       );
     }
-    // Ownership transfer: from here this backend owns the session, the
-    // provider gate, the execution promise, and tempDir cleanup.
-    this.#preparations.take(plan.preflightId);
+    if (
+      (!continuation && canonicalJson(primed.conversation) !== canonicalJson(plan.conversation)) ||
+      (continuation && continuation.retained.reservedBy !== plan.preflightId)
+    ) {
+      if (continuation) await this.#stopRetained(continuation.retained);
+      else await this.#preparations.stop(primed);
+      this.#releaseRetentionReservation(plan.preflightId);
+      throw new Error("Pi in-process execution plan does not match its approved history.");
+    }
+    // Ownership transfer for a first run. A continuation keeps the retained
+    // session owned by the backend until this turn either succeeds or retires it.
+    if (!continuation) this.#preparations.take(plan.preflightId);
 
     let effectiveToolNames: string[];
     let report: ProcessRunReport;
@@ -215,7 +348,8 @@ export class PiInProcessBackend implements ExecutionBackend {
     } catch (error) {
       // Ownership already transferred: clean up here, because discard() can no
       // longer see this preparation in the gate.
-      await this.#cleanupRun(plan.preparedRunId, primed);
+      this.#releaseRetentionReservation(plan.preflightId);
+      await this.#cleanupRun(plan.preparedRunId, primed, continuation?.retained);
       throw error;
     }
 
@@ -223,6 +357,7 @@ export class PiInProcessBackend implements ExecutionBackend {
     try {
       const active: ActiveInProcessRun = {
         session: primed.session,
+        ...(continuation ? { retained: continuation.retained } : {}),
         forceSettle: deferred<void>(),
       };
       this.#active.set(plan.preparedRunId, active);
@@ -255,7 +390,8 @@ export class PiInProcessBackend implements ExecutionBackend {
     } catch (error) {
       // Ownership already transferred: clean up here, because discard() can no
       // longer see this preparation in the gate.
-      await this.#cleanupRun(plan.preparedRunId, primed);
+      this.#releaseRetentionReservation(plan.preflightId);
+      await this.#cleanupRun(plan.preparedRunId, primed, continuation?.retained);
       throw error;
     }
     const active = this.#active.get(plan.preparedRunId)!;
@@ -269,21 +405,68 @@ export class PiInProcessBackend implements ExecutionBackend {
     const result = (async (): Promise<BackendResult> => {
       let executionError: unknown;
       try {
-        // Release the parked provider request; the sealed conversation now
-        // executes in this process against the host model runtime.
-        primed.providerGate.resolve();
+        // A continuation gets a fresh gate and a real user prompt. The bridge
+        // still substitutes only the original frozen conversation; accumulated
+        // assistant/tool messages remain in the same AgentSession transcript.
+        if (continuation) {
+          // Rearming creates the gate for this exact approved turn. Release
+          // that gate before starting the prompt; otherwise the provider
+          // request waits forever on the newly-created deferred.
+          const providerGate = primed.rearmProviderGate();
+          providerGate.resolve();
+          primed.startTurn(continuation.task);
+        } else {
+          primed.providerGate.resolve();
+        }
         // A non-cooperative provider may ignore abort; a bounded termination
         // resolves forceSettle so this run still reaches a terminal result.
         await Promise.race([primed.execution, active.forceSettle.promise]);
       } catch (error) {
         executionError = error;
-      } finally {
-        context.signal.removeEventListener("abort", abort);
-        unsubscribe?.();
-        await this.#cleanupRun(plan.preparedRunId, primed);
       }
-      return this.#terminalResult(plan, report, active, context, executionError);
-    })();
+      context.signal.removeEventListener("abort", abort);
+      unsubscribe?.();
+      const terminal = this.#terminalResult(plan, report, active, context, executionError);
+      const retain = terminal.status === "completed" && plan.intent.continuation?.retain === true;
+      if (retain) {
+        try {
+          const retained = continuation?.retained ?? this.#newRetained(primed, plan);
+          if (continuation) retained.reservedBy = undefined;
+          this.#retained.set(retained.id, retained);
+          this.#active.delete(plan.preparedRunId);
+          const continuationId = retained.id;
+          return { ...terminal, continuationId };
+        } catch (error) {
+          // A retention allocation or terminal event failure must not leave a
+          // live session detached from either the active-run or retained maps.
+          this.#releaseRetentionReservation(plan.preflightId);
+          try {
+            await this.#cleanupRun(plan.preparedRunId, primed, continuation?.retained);
+          } catch (cleanupError) {
+            error = new AggregateError([error, cleanupError]);
+          }
+          return this.#failedBackendResult(plan, error, report);
+        }
+      }
+      this.#releaseRetentionReservation(plan.preflightId);
+      try {
+        await this.#cleanupRun(plan.preparedRunId, primed, continuation?.retained);
+      } catch (cleanupError) {
+        return this.#failedBackendResult(plan, cleanupError, report);
+      }
+      return terminal;
+    })().catch(async (error): Promise<BackendResult> => {
+      // Includes context.emit failures from terminal reporting. The result
+      // promise must settle only after the session and any capacity
+      // reservation have been cleaned up.
+      this.#releaseRetentionReservation(plan.preflightId);
+      try {
+        await this.#cleanupRun(plan.preparedRunId, primed, continuation?.retained);
+      } catch (cleanupError) {
+        error = new AggregateError([error, cleanupError]);
+      }
+      return this.#failedBackendResult(plan, error, report);
+    });
 
     return {
       result,
@@ -300,12 +483,33 @@ export class PiInProcessBackend implements ExecutionBackend {
     };
   }
 
+  /** Runtime-internal rollback for accepted preflights cancelled before prepare. */
+  releasePreflightReservation(preflightId: string): void {
+    this.#releaseRetentionReservation(preflightId);
+  }
+
   async discard(preparation: BackendPreparation): Promise<void> {
-    const primed = preparation.state as PrimedPreparation | undefined;
-    if (!primed || this.#preparations.get(primed.preflightId) !== primed) {
+    const state = preparation.state as PrimedPreparation | ContinuationPreparation | undefined;
+    if (state && typeof state === "object" && "kind" in state && state.kind === "continuation") {
+      state.retained.reservedBy = undefined;
       return;
     }
+    const primed = state as PrimedPreparation | undefined;
+    if (!primed || this.#preparations.get(primed.preflightId) !== primed) {
+      if (primed) this.#releaseRetentionReservation(primed.preflightId);
+      return;
+    }
+    this.#releaseRetentionReservation(primed.preflightId);
     await this.#preparations.stop(primed);
+  }
+
+  async releaseContinuation(id: string): Promise<void> {
+    const retained = this.#retained.get(id);
+    if (!retained) return;
+    if (retained.reservedBy !== undefined) {
+      throw new Error("Cannot release a continuation with a prepared turn.");
+    }
+    await this.#stopRetained(retained);
   }
 
   /**
@@ -322,14 +526,31 @@ export class PiInProcessBackend implements ExecutionBackend {
 
   /** Backend-level cleanup: stops preparations and aborts active runs. */
   async dispose(): Promise<void> {
-    await this.#preparations.stopAll();
-    await Promise.all(
-      [...this.#active.keys()].map((preparedRunId) =>
+    const cleanup = [
+      this.#preparations.stopAll(),
+      ...[...this.#active.keys()].map((preparedRunId) =>
         this.#terminateRun(preparedRunId, "In-process backend disposed."),
       ),
-    );
+      ...[...this.#retained.values()].map((retained) =>
+        this.#stopRetained(retained),
+      ),
+    ];
+    const outcomes = await Promise.allSettled(cleanup);
+    this.#retentionReservations.clear();
     this.#active.clear();
     this.#reports.clear();
+    const failures = outcomes
+      .filter(
+        (outcome): outcome is PromiseRejectedResult =>
+          outcome.status === "rejected",
+      )
+      .map(({ reason }) => reason);
+    if (failures.length > 0) {
+      throw new AggregateError(
+        failures,
+        "In-process backend cleanup encountered failures.",
+      );
+    }
   }
 
   async #terminateRun(
@@ -355,14 +576,84 @@ export class PiInProcessBackend implements ExecutionBackend {
     await active.termination;
   }
 
+  #newRetained(
+    primed: PrimedPreparation,
+    plan: SealedPlanSnapshot,
+  ): RetainedContinuation {
+    if (!this.#retentionReservations.has(plan.preflightId)) {
+      throw new Error("The in-process continuation retention reservation is missing.");
+    }
+    const retained: RetainedContinuation = {
+      id: `pi-continuation:${randomUUID()}`,
+      primed,
+      binding: continuationBinding(plan.intent),
+      runtime: structuredClone(primed.runtime),
+      conversation: structuredClone(primed.conversation),
+      reservedBy: undefined,
+    };
+    // Consume only after construction succeeds; a clone/id failure leaves the
+    // capacity reservation available for cleanup/retry rather than leaking it.
+    this.#retentionReservations.delete(plan.preflightId);
+    return retained;
+  }
+
+  #releaseRetentionReservation(preflightId: string): void {
+    this.#retentionReservations.delete(preflightId);
+  }
+
+  #failedBackendResult(
+    plan: SealedPlanSnapshot,
+    error: unknown,
+    report?: ProcessRunReport,
+  ): BackendResult {
+    const message = error instanceof Error ? error.message : String(error);
+    if (report) report.status = "failed";
+    const output = report ? latestProcessAssistantText(report.messages) : undefined;
+    return {
+      status: "failed",
+      error: { code: "inprocess-cleanup", message, retryable: false },
+      enforcement: {
+        access: structuredClone(plan.preflight.access),
+        limits: structuredClone(plan.preflight.limits),
+      },
+      ...(output ? { output: { text: output, partial: true } } : {}),
+    };
+  }
+
+  async #stopRetained(retained: RetainedContinuation): Promise<void> {
+    try {
+      await this.#preparations.stop(retained.primed);
+    } catch (error) {
+      retained.reservedBy = undefined;
+      throw error;
+    }
+    this.#retire(retained);
+  }
+
+  #retire(retained: RetainedContinuation): void {
+    if (this.#retained.get(retained.id) === retained) {
+      this.#retained.delete(retained.id);
+    }
+    retained.reservedBy = undefined;
+  }
+
   async #cleanupRun(
     preparedRunId: string,
     primed: PrimedPreparation,
+    retained?: RetainedContinuation,
   ): Promise<void> {
-    this.#active.delete(preparedRunId);
     // Delegate to the gate so the parked execution settles (provider gate
     // rejected, transport stopped) instead of leaking a pending promise.
-    await this.#preparations.stop(primed);
+    try {
+      await this.#preparations.stop(primed);
+    } catch (error) {
+      if (retained) retained.reservedBy = undefined;
+      throw error;
+    }
+    if (this.#active.get(preparedRunId)?.session === primed.session) {
+      this.#active.delete(preparedRunId);
+    }
+    if (retained) this.#retire(retained);
   }
 
   #terminalResult(
@@ -460,6 +751,90 @@ export function sanitizePiInProcessRunReport(
   report: PiInProcessRunReport,
 ): PiInProcessRunReport {
   return sanitizeProcessRunReport(report, sanitizeSubprocessReportValue);
+}
+
+function continuationBinding(intent: SealedPlanSnapshot["intent"]): string {
+  const { continuation: _continuation, ...stable } = intent;
+  return fingerprint(stable);
+}
+
+function retainedHistory(retained: RetainedContinuation): PreparedConversation {
+  const messages = [...retained.conversation.messages];
+  const sessionMessages = (retained.primed.session as unknown as { messages?: unknown[] }).messages;
+  if (!Array.isArray(sessionMessages)) {
+    throw new Error("Retained session history is unavailable; refusing to continue.");
+  }
+  const trigger = "Prepare the subagent prompt runtime without contacting the provider.";
+  const triggerIndex = sessionMessages.findIndex((message) =>
+    isTriggerAgentMessage(message, trigger),
+  );
+  if (triggerIndex < 0) {
+    // This is also the compaction/folding failure mode: the bridge can no
+    // longer locate the original trigger and would otherwise silently submit
+    // only the original compiled prefix for approval.
+    throw new Error(
+      "Retained session preparation trigger is missing; refusing to continue after context compaction.",
+    );
+  }
+  for (const message of sessionMessages.slice(triggerIndex + 1)) {
+    messages.push(agentMessageToPrepared(message));
+  }
+  return { systemPrompt: retained.conversation.systemPrompt, messages };
+}
+
+function appendedContinuationTask(
+  history: PreparedConversation,
+  conversation: PreparedConversation,
+): string {
+  if (conversation.systemPrompt !== history.systemPrompt) {
+    throw new Error("Continuation changed the frozen system prompt; prepare a new child.");
+  }
+  if (conversation.messages.length !== history.messages.length + 1) {
+    throw new Error(
+      "Continuation approval must contain the complete retained history plus exactly one new task.",
+    );
+  }
+  for (let index = 0; index < history.messages.length; index += 1) {
+    if (canonicalJson(conversation.messages[index]) !== canonicalJson(history.messages[index])) {
+      throw new Error("Continuation approval changed retained history; prepare a new child.");
+    }
+  }
+  const task = conversation.messages[conversation.messages.length - 1];
+  if (!task || task.role !== "user") {
+    throw new Error("Continuation approval must append a user task.");
+  }
+  if (task.content.length !== 1 || task.content[0]?.type !== "text") {
+    throw new Error(
+      "Continuation task must contain exactly one plain text content part.",
+    );
+  }
+  const text = task.content[0].text;
+  if (!text.trim()) throw new Error("Continuation task must not be empty.");
+  return text;
+}
+
+function isTriggerAgentMessage(message: unknown, trigger: string): boolean {
+  if (!message || typeof message !== "object" || (message as { role?: unknown }).role !== "user") return false;
+  const content = (message as { content?: unknown }).content;
+  return content === trigger || (
+    Array.isArray(content) && content.length === 1 &&
+    (content[0] as { type?: unknown; text?: unknown })?.type === "text" &&
+    (content[0] as { text?: unknown }).text === trigger
+  );
+}
+
+function agentMessageToPrepared(message: unknown): PreparedMessage {
+  if (!message || typeof message !== "object") {
+    throw new Error("Retained session history contains a malformed native message.");
+  }
+  // Approval/hash history is deliberately a lossless canonical envelope. It
+  // is not fed back into the native session; the SDK transcript remains the
+  // authoritative execution history. Keeping the full native object here
+  // preserves thinking blocks, toolCallId, media, and top-level metadata.
+  return {
+    role: "custom",
+    content: [{ type: "text", text: canonicalJson(message) }],
+  };
 }
 
 function abortReason(signal: AbortSignal): string {

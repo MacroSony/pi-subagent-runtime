@@ -194,6 +194,8 @@ export interface BackendCapabilities {
   mediaMimeTypes: readonly string[];
   remoteTransport: boolean;
   promptRuntimeFidelity: PromptRuntimeFidelity;
+  /** True only when this backend can retain a real in-memory child session. */
+  continuation?: boolean;
 }
 
 export interface BackendDescriptor {
@@ -251,6 +253,11 @@ export interface PreparedConversation {
   messages: readonly PreparedMessage[];
 }
 
+export interface ContinuationIntent {
+  retain: true;
+  id?: string;
+}
+
 export interface ExecutionIntent {
   model: ModelReference;
   thinkingLevel?: string;
@@ -260,6 +267,8 @@ export interface ExecutionIntent {
   media?: readonly MediaReference[];
   workspaceProposal?: WorkspaceProposalReference;
   provenance?: Readonly<Record<string, string>>;
+  /** Retain this in-process child, or identify one retained by this runtime. */
+  continuation?: ContinuationIntent;
 }
 
 export interface BackendPreflightAccepted {
@@ -360,7 +369,7 @@ export interface RunOutput {
   partial: boolean;
 }
 
-interface RunResultCommon {
+export interface RunResultCommon {
   schemaVersion: typeof EXECUTION_CONTRACT_VERSION;
   runId: string;
   preparedRunId: string;
@@ -374,6 +383,8 @@ interface RunResultCommon {
   usage?: RunUsage;
   /** Authoritative proposed workspace changes, if this backend supports them. */
   workspaceChanges?: readonly WorkspaceChangeSet[];
+  /** Opaque, runtime-instance-local handle for a retained child session. */
+  continuationId?: string;
 }
 
 export interface RunResultCompleted extends RunResultCommon {

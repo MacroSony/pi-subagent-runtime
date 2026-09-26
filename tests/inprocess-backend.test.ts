@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { AgentSession } from "@earendil-works/pi-coding-agent";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 
 import { createFixturePiRuntime } from "./helpers/fixture-pi-runtime.ts";
@@ -233,6 +234,222 @@ test("in-process multi-turn runs keep the sealed conversation and never leak the
   }
 });
 
+test("in-process continuation reuses the same session, reauthorizes full history, and releases explicitly", async () => {
+  const providerContexts: Array<{ system: string; messages: unknown[] }> = [];
+  const { faux, modelRegistry } = await createFixturePiRuntime({
+    provider: PROVIDER,
+    api: API,
+    modelId: MODEL_ID,
+  });
+  faux.setResponses([
+    (context) => {
+      providerContexts.push({ system: context.systemPrompt ?? "", messages: structuredClone(context.messages ?? []) });
+      return fauxAssistantMessage(fauxToolCall("read", { path: "package.json" }));
+    },
+    (context) => {
+      providerContexts.push({ system: context.systemPrompt ?? "", messages: structuredClone(context.messages ?? []) });
+      return fauxAssistantMessage("First answer with SECRET_MARKER and tool history.");
+    },
+    (context) => {
+      providerContexts.push({ system: context.systemPrompt ?? "", messages: structuredClone(context.messages ?? []) });
+      return fauxAssistantMessage("Second answer.");
+    },
+    (context) => {
+      providerContexts.push({ system: context.systemPrompt ?? "", messages: structuredClone(context.messages ?? []) });
+      return fauxAssistantMessage("After discard.");
+    },
+  ]);
+  const backend = new PiInProcessBackend({ modelRegistry, cwd: process.cwd() });
+  const runtime = createExecutionRuntime();
+  runtime.registerBackend(backend);
+  try {
+    const first = await runtime.prepare({
+      backendId: PI_INPROCESS_BACKEND_ID,
+      intent: fixtureIntent({ continuation: { retain: true } }),
+      compile: async () => fixtureConversation(),
+    });
+    assert.equal(providerContexts.length, 0);
+    const firstResult = await runtime.execute(first).result;
+    assert.equal(firstResult.status, "completed");
+    assert.ok(firstResult.continuationId);
+    const continuationId = firstResult.continuationId!;
+
+    let approvedHistory: PreparedConversation | undefined;
+    const second = await runtime.prepare({
+      backendId: PI_INPROCESS_BACKEND_ID,
+      intent: fixtureIntent({ continuation: { retain: true, id: continuationId } }),
+      compile: async (_runtime, _preflight, continuation) => {
+        approvedHistory = continuation?.history;
+        assert.ok(approvedHistory);
+        return {
+          systemPrompt: approvedHistory!.systemPrompt,
+          messages: [
+            ...approvedHistory!.messages,
+            { role: "user", content: [{ type: "text", text: "Continue with the approved context." }] },
+          ],
+        };
+      },
+    });
+    assert.equal(providerContexts.length, 2, "approval must not contact provider");
+    assert.ok(second.snapshot().conversation.messages.length > first.snapshot().conversation.messages.length);
+    const secondResult = await runtime.execute(second).result;
+    assert.equal(secondResult.status, "completed");
+    assert.equal(secondResult.continuationId, continuationId);
+    assert.equal(providerContexts.length, 3);
+    assert.equal(providerContexts[2]!.system, fixtureConversation().systemPrompt);
+    const visible = JSON.stringify(providerContexts[2]!.messages);
+    assert.match(visible, /Do the fixture task/);
+    assert.match(visible, /SECRET_MARKER/);
+    assert.match(visible, /toolResult/);
+    assert.match(visible, /Continue with the approved context/);
+    assert.doesNotMatch(visible, /Prepare the subagent prompt runtime without contacting the provider/);
+    assert.deepEqual(secondResult.usage?.requests, { total: 1, cacheKnown: 1, usageKnown: 1 });
+
+    const disposable = await runtime.prepare({
+      backendId: PI_INPROCESS_BACKEND_ID,
+      intent: fixtureIntent({ continuation: { retain: true, id: continuationId } }),
+      compile: async (_runtime, _preflight, continuation) => ({
+        systemPrompt: continuation!.history.systemPrompt,
+        messages: [...continuation!.history.messages, {
+          role: "user", content: [{ type: "text", text: "Discard this task." }],
+        }],
+      }),
+    });
+    await assert.rejects(() => runtime.prepare({
+      backendId: PI_INPROCESS_BACKEND_ID,
+      intent: fixtureIntent({ continuation: { retain: true, id: continuationId } }),
+      compile: async () => { throw new Error("locked continuation must not compile"); },
+    }));
+    await disposable.discard();
+    const afterDiscard = await runtime.prepare({
+      backendId: PI_INPROCESS_BACKEND_ID,
+      intent: fixtureIntent({ continuation: { retain: true, id: continuationId } }),
+      compile: async (_runtime, _preflight, continuation) => ({
+        systemPrompt: continuation!.history.systemPrompt,
+        messages: [...continuation!.history.messages, {
+          role: "user", content: [{ type: "text", text: "Continue after discard." }],
+        }],
+      }),
+    });
+    assert.equal((await runtime.execute(afterDiscard).result).status, "completed");
+    assert.equal(providerContexts.length, 4);
+
+    await runtime.releaseContinuation(continuationId);
+    const denied = await runtime.prepare({
+      backendId: PI_INPROCESS_BACKEND_ID,
+      intent: fixtureIntent({ continuation: { retain: true, id: continuationId } }),
+      compile: async () => { throw new Error("released continuation must not compile"); },
+    }).then(() => false, () => true);
+    assert.equal(denied, true);
+  } finally {
+    await runtime.dispose();
+    await backend.dispose();
+    modelRegistry.unregisterProvider(PROVIDER);
+  }
+});
+
+test("in-process cleanup retries a failed retained stop and attempts other children", async () => {
+  const { faux, modelRegistry } = await createFixturePiRuntime({
+    provider: PROVIDER,
+    api: API,
+    modelId: MODEL_ID,
+  });
+  faux.setResponses([
+    fauxAssistantMessage("first retained child"),
+    fauxAssistantMessage("second retained child"),
+  ]);
+  const backend = new PiInProcessBackend({ modelRegistry, cwd: process.cwd() });
+  const runtime = createExecutionRuntime();
+  runtime.registerBackend(backend);
+  const originalDispose = AgentSession.prototype.dispose;
+  let disposeCalls = 0;
+  AgentSession.prototype.dispose = function (): void {
+    disposeCalls += 1;
+    if (disposeCalls === 1) throw new Error("injected retained stop failure");
+    originalDispose.call(this);
+  };
+  try {
+    const retainedIds: string[] = [];
+    for (let index = 0; index < 2; index += 1) {
+      const prepared = await runtime.prepare({
+        backendId: PI_INPROCESS_BACKEND_ID,
+        intent: fixtureIntent({ continuation: { retain: true } }),
+        compile: async () => fixtureConversation(),
+      });
+      const result = await runtime.execute(prepared).result;
+      assert.equal(result.status, "completed");
+      if (result.status !== "completed") return;
+      retainedIds.push(result.continuationId!);
+    }
+    assert.equal(retainedIds.length, 2);
+
+    await assert.rejects(
+      () => backend.dispose(),
+      /In-process backend cleanup encountered failures/,
+    );
+    // The first child failed, but the second child was still attempted. The
+    // failed owner remains for the next bounded cleanup call.
+    assert.equal(disposeCalls, 2);
+    await backend.dispose();
+    assert.equal(disposeCalls, 3);
+  } finally {
+    AgentSession.prototype.dispose = originalDispose;
+    await runtime.dispose().catch(() => undefined);
+    await backend.dispose().catch(() => undefined);
+    modelRegistry.unregisterProvider(PROVIDER);
+  }
+});
+
+test("runtime retains a continuation owner after an explicit release failure", async () => {
+  const { faux, modelRegistry } = await createFixturePiRuntime({
+    provider: PROVIDER,
+    api: API,
+    modelId: MODEL_ID,
+  });
+  faux.setResponses([fauxAssistantMessage("retained for retry")]);
+  const backend = new PiInProcessBackend({ modelRegistry, cwd: process.cwd() });
+  const runtime = createExecutionRuntime();
+  const registration = runtime.registerBackend(backend);
+  const originalDispose = AgentSession.prototype.dispose;
+  let disposeCalls = 0;
+  AgentSession.prototype.dispose = function (): void {
+    disposeCalls += 1;
+    if (disposeCalls === 1) throw new Error("injected explicit stop failure");
+    originalDispose.call(this);
+  };
+  try {
+    const prepared = await runtime.prepare({
+      backendId: PI_INPROCESS_BACKEND_ID,
+      intent: fixtureIntent({ continuation: { retain: true } }),
+      compile: async () => fixtureConversation(),
+    });
+    const result = await runtime.execute(prepared).result;
+    assert.equal(result.status, "completed");
+    if (result.status !== "completed") return;
+
+    await assert.rejects(
+      () =>
+        Promise.all([
+          runtime.releaseContinuation(result.continuationId!),
+          runtime.releaseContinuation(result.continuationId!),
+        ]),
+      /Pi preparation cleanup failed/,
+    );
+    // Concurrent release calls share one bounded stop attempt.
+    assert.equal(disposeCalls, 1);
+    // Remove the backend from discovery: a second successful release proves
+    // the runtime kept the owner map entry after the failed await.
+    registration.dispose();
+    await runtime.releaseContinuation(result.continuationId!);
+    assert.equal(disposeCalls, 2);
+  } finally {
+    AgentSession.prototype.dispose = originalDispose;
+    await runtime.dispose().catch(() => undefined);
+    await backend.dispose().catch(() => undefined);
+    modelRegistry.unregisterProvider(PROVIDER);
+  }
+});
+
 test("in-process backend cancels a running execution", async () => {
   const { faux, modelRegistry } = await createFixturePiRuntime({
     provider: PROVIDER,
@@ -316,6 +533,31 @@ test("in-process backend refuses isolated boundaries and dishonest network polic
     );
   } finally {
     await backend.dispose();
+    modelRegistry.unregisterProvider(PROVIDER);
+  }
+});
+
+
+test("retained SDK children disable automatic compaction without saving settings", async () => {
+  const { faux, modelRegistry } = await createFixturePiRuntime({ provider: PROVIDER, api: API, modelId: MODEL_ID });
+  faux.setResponses([fauxAssistantMessage("retained")]);
+  const original = AgentSession.prototype.prompt;
+  let observed = false;
+  AgentSession.prototype.prompt = function (...args) {
+    observed = true;
+    assert.equal(this.autoCompactionEnabled, false);
+    return original.apply(this, args);
+  };
+  const runtime = createExecutionRuntime();
+  runtime.registerBackend(new PiInProcessBackend({ modelRegistry, cwd: process.cwd() }));
+  try {
+    const prepared = await runtime.prepare({ backendId: PI_INPROCESS_BACKEND_ID,
+      intent: fixtureIntent({ continuation: { retain: true } }), compile: async () => fixtureConversation() });
+    assert.equal((await runtime.execute(prepared).result).status, "completed");
+    assert.equal(observed, true);
+  } finally {
+    AgentSession.prototype.prompt = original;
+    await runtime.dispose();
     modelRegistry.unregisterProvider(PROVIDER);
   }
 });

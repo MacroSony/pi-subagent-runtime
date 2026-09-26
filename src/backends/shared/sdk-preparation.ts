@@ -50,7 +50,13 @@ export interface PrimedPreparation {
   tempDir: string;
   providerGate: Deferred<void>;
   execution: Promise<void>;
+  /** Reset the provider gate before a retained session's next turn. */
+  rearmProviderGate: () => Deferred<void>;
+  /** Start a real user turn on this already-created AgentSession. */
+  startTurn: (task: string) => Promise<void>;
   disposed: boolean;
+  /** The in-flight stop attempt, shared by concurrent cleanup callers. */
+  stopPromise: Promise<void> | undefined;
   /**
    * Permanently blocks provider transport for this preparation at the stream
    * level. Extension-hook errors are caught by the Pi event runner, so a
@@ -115,7 +121,8 @@ export class SdkPreparationGate {
   }
 
   get(model: PrimedPreparation["preflightId"]): PrimedPreparation | undefined {
-    return this.#primed.get(model);
+    const primed = this.#primed.get(model);
+    return primed && !primed.stopPromise ? primed : undefined;
   }
 
   async prepare(
@@ -148,6 +155,7 @@ export class SdkPreparationGate {
     let runtime: PromptRuntime | undefined;
     let session: AgentSession | undefined;
     let execution: Promise<void> | undefined;
+    let currentProviderGate = providerGate;
     // Extension-hook errors are swallowed by the Pi event runner, so provider
     // transport is additionally blocked in the stream path itself.
     let transportStopped = false;
@@ -175,10 +183,13 @@ export class SdkPreparationGate {
             factory: this.#compilerBridge(
               input,
               context,
-              providerGate,
+              () => currentProviderGate,
               preparationReady,
               (candidateRuntime) => {
                 runtime = candidateRuntime;
+              },
+              () => {
+                transportStopped = true;
               },
             ),
           },
@@ -190,6 +201,12 @@ export class SdkPreparationGate {
         noContextFiles: true,
       });
       await resourceLoader.reload();
+      // Simple continuation preserves the original full context: do not
+      // silently summarize it or trigger a separate compaction model request.
+      // This is an in-memory override, never a target/user settings write.
+      if (input.intent.continuation?.retain) {
+        settingsManager.applyOverrides({ compaction: { enabled: false } });
+      }
       const created = await createAgentSession({
         cwd: this.#cwd,
         agentDir: tempDir,
@@ -224,9 +241,20 @@ export class SdkPreparationGate {
         conversation,
         session,
         tempDir,
-        providerGate,
+        providerGate: currentProviderGate,
         execution,
+        rearmProviderGate: () => {
+          currentProviderGate = deferred<void>();
+          primed.providerGate = currentProviderGate;
+          return currentProviderGate;
+        },
+        startTurn: (task: string) => {
+          const turn = this.#startTurn(session!, task);
+          primed.execution = turn;
+          return turn;
+        },
         disposed: false,
+        stopPromise: undefined,
         stopTransport: inFlight.stopTransport,
       };
       this.#primed.set(input.preflight.preflightId, primed);
@@ -252,21 +280,61 @@ export class SdkPreparationGate {
   /** Releases a primed preparation exactly once. */
   async stop(primed: PrimedPreparation): Promise<void> {
     if (primed.disposed) return;
-    primed.disposed = true;
-    this.#primed.delete(primed.preflightId);
-    primed.stopTransport();
-    void primed.session.abort();
-    primed.providerGate.reject(
-      new Error("Dry preparation completed without provider transport."),
-    );
-    // A resumed (in-process) execution may be stuck on a non-cooperative
-    // provider even after abort and transport-stop; never hang cleanup on it.
-    await Promise.race([
-      primed.execution.catch(() => undefined),
-      new Promise<void>((resolve) => setTimeout(resolve, STOP_GRACE_MS)),
-    ]);
-    primed.session.dispose();
-    rmSync(primed.tempDir, { recursive: true, force: true });
+    if (primed.stopPromise) return primed.stopPromise;
+
+    let stopPromise!: Promise<void>;
+    const attempt = (async () => {
+      // Stop transport before waiting for or disposing anything. This is
+      // intentionally repeated on retries: a failed cleanup must remain
+      // fail-closed and must not be able to start another provider request.
+      primed.stopTransport();
+      void primed.session.abort().catch(() => undefined);
+      primed.providerGate.reject(
+        new Error("Dry preparation completed without provider transport."),
+      );
+      // A resumed (in-process) execution may be stuck on a non-cooperative
+      // provider even after abort and transport-stop; never hang cleanup on it.
+      await Promise.race([
+        primed.execution.catch(() => undefined),
+        new Promise<void>((resolve) => setTimeout(resolve, STOP_GRACE_MS)),
+      ]);
+
+      // Try both independent cleanup operations. If either fails, the
+      // preparation remains owned and a later stop() can retry both safely.
+      const failures: unknown[] = [];
+      try {
+        primed.session.dispose();
+      } catch (error) {
+        failures.push(error);
+      }
+      try {
+        rmSync(primed.tempDir, { recursive: true, force: true });
+      } catch (error) {
+        failures.push(error);
+      }
+      if (failures.length > 0) {
+        throw new AggregateError(failures, "Pi preparation cleanup failed.");
+      }
+    })();
+    stopPromise = attempt.then(
+      () => {
+        primed.disposed = true;
+        if (this.#primed.get(primed.preflightId) === primed) {
+          this.#primed.delete(primed.preflightId);
+        }
+      },
+      (error) => {
+        // Do not mark disposed or remove the gate entry on failure. The owner
+        // is deliberately retained for an explicit or backend-wide retry.
+        throw error;
+      },
+    ).finally(() => {
+      if (!primed.disposed && primed.stopPromise === stopPromise) {
+        primed.stopPromise = undefined;
+      }
+    });
+    primed.stopPromise = stopPromise;
+    return stopPromise;
   }
 
   /**
@@ -279,7 +347,7 @@ export class SdkPreparationGate {
   take(preflightId: string): PrimedPreparation | undefined {
     if (this.#closed) return undefined;
     const primed = this.#primed.get(preflightId);
-    if (!primed || primed.disposed) return undefined;
+    if (!primed || primed.disposed || primed.stopPromise) return undefined;
     this.#primed.delete(preflightId);
     return primed;
   }
@@ -300,20 +368,39 @@ export class SdkPreparationGate {
     await Promise.all(
       [...this.#inFlight].map((record) => record.done.promise),
     );
-    for (const primed of [...this.#primed.values()]) await this.stop(primed);
+    const outcomes = await Promise.allSettled(
+      [...this.#primed.values()].map((primed) => this.stop(primed)),
+    );
+    const failures = outcomes
+      .filter(
+        (outcome): outcome is PromiseRejectedResult =>
+          outcome.status === "rejected",
+      )
+      .map(({ reason }) => reason);
+    if (failures.length > 0) {
+      throw new AggregateError(
+        failures,
+        "Pi preparation gate cleanup encountered failures.",
+      );
+    }
   }
 
   #compilerBridge(
     input: AcceptedPreparationInput,
     context: BackendPreparationContext,
-    providerGate: Deferred<void>,
+    providerGate: () => Deferred<void>,
     preparationReady: Deferred<PreparedConversation>,
     setRuntime: (runtime: PromptRuntime) => void,
+    failClosed: () => void,
   ): ExtensionFactory {
     return (pi: ExtensionAPI) => {
       let compiled: PreparedConversation | undefined;
       pi.on("before_agent_start", async (event) => {
         try {
+          // The host compiler belongs to preparation, not to later turns.
+          // Reusing the frozen result also preserves the original system
+          // prompt/tools while the context bridge supplies accumulated history.
+          if (compiled) return { systemPrompt: compiled.systemPrompt };
           const runtime = this.#runtimeSnapshot(
             input.preflight.model,
             event.systemPrompt,
@@ -325,15 +412,19 @@ export class SdkPreparationGate {
           return { systemPrompt: compiled.systemPrompt };
         } catch (error) {
           preparationReady.reject(error);
-          providerGate.reject(error);
+          providerGate().reject(error);
+          failClosed();
           throw error;
         }
       });
       pi.on("context", (event) => {
         if (!compiled) {
-          throw new Error(
+          const error = new Error(
             "Pi context event arrived before host preparation.",
           );
+          failClosed();
+          providerGate().reject(error);
+          throw error;
         }
         const compiledMessages = compiled.messages.map((message, index) =>
           preparedMessageToAgentMessage(message, input.preflight.model, index),
@@ -351,7 +442,17 @@ export class SdkPreparationGate {
         const triggerIndex = event.messages.findIndex((message) =>
           isTriggerMessage(message),
         );
-        if (triggerIndex === -1) return undefined;
+        if (triggerIndex === -1) {
+          // A missing trigger means Pi compacted/folded away the bridge's
+          // anchor. Continuing with the native context would silently omit
+          // the original compiled conversation, so fail closed instead.
+          const error = new Error(
+            "Pi retained context lost the preparation trigger; refusing provider transport.",
+          );
+          failClosed();
+          providerGate().reject(error);
+          throw error;
+        }
         return {
           messages: [
             ...event.messages.slice(0, triggerIndex),
@@ -361,7 +462,7 @@ export class SdkPreparationGate {
         };
       });
       pi.on("before_provider_request", async () => {
-        await providerGate.promise;
+        await providerGate().promise;
       });
     };
   }
@@ -413,6 +514,11 @@ export class SdkPreparationGate {
       // instead of a generic "no assistant report".
       throw error;
     }
+  }
+
+  async #startTurn(session: AgentSession, task: string): Promise<void> {
+    await session.prompt(task, { source: "extension" });
+    await session.waitForIdle();
   }
 }
 

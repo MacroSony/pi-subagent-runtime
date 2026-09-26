@@ -47,3 +47,9 @@ const nativeUsage = {
 A partial native-shaped object is forbidden: Pi requires all five token
 fields and all five cost fields. If coverage is mixed or legacy, retain the
 runtime summary/details and do not fabricate missing cache or cost components.
+
+## Continuation usage
+
+Continuation usage is reported per provider run, not cumulatively across the
+retained child. The `continuationId` is an opaque in-memory handle; release it
+with `ExecutionRuntime.releaseContinuation(id)` when it is no longer needed.

@@ -104,6 +104,20 @@ test("backend registration is explicit, sorted, cloned, and disposable", async (
   await runtime.dispose();
 });
 
+test("continuation intents are denied before unsupported backend preflight", async () => {
+  const runtime = deterministicRuntime();
+  const backend = new DeterministicFakeBackend();
+  runtime.registerBackend(backend);
+  await assert.rejects(
+    () => runtime.prepare(request(backend, {
+      intent: fakeExecutionIntent({ continuation: { retain: true } }),
+    })),
+    runtimeError("preflight.continuation-unsupported"),
+  );
+  assert.equal(backend.preflightCalls.length, 0);
+  await runtime.dispose();
+});
+
 test("accepted preflight IDs are scoped to backend identity", async () => {
   const runtime = deterministicRuntime();
   const first = new DeterministicFakeBackend({ id: "first-backend" });
@@ -817,4 +831,35 @@ test("runtime disposal aborts and waits for in-flight preparation", async () => 
   const disposing = runtime.dispose();
   await assert.rejects(preparing, runtimeError("preparation.cancelled"));
   await disposing;
+});
+
+test("host cancellation releases a child retained by a racing backend completion", async () => {
+  const runtime = deterministicRuntime();
+  const backend = new DeterministicFakeBackend();
+  backend.descriptor.capabilities.continuation = true;
+  backend.executionMode = "delayed";
+  const childId = "retained-race-child";
+  const released: string[] = [];
+  const start = backend.start.bind(backend);
+  backend.start = (input, context) => {
+    const execution = start(input, context);
+    return { ...execution, result: execution.result.then((result) => ({
+      ...result, status: "completed" as const,
+      output: { text: "done", partial: false as const }, continuationId: childId,
+    })) };
+  };
+  (backend as typeof backend & { releaseContinuation(id: string): Promise<void> }).releaseContinuation = async (id) => { released.push(id); };
+  runtime.registerBackend(backend);
+  const run = runtime.execute(await runtime.prepare(request(backend, {
+    intent: fakeExecutionIntent({ continuation: { retain: true } }),
+  })));
+  await backend.waitForStart();
+  const cancelling = run.cancel("host wins");
+  await waitFor(() => backend.cancelCalls.length === 1);
+  backend.releaseNextExecution();
+  await cancelling;
+  assert.equal((await run.result).status, "cancelled");
+  assert.equal((await run.result).continuationId, undefined);
+  assert.deepEqual(released, [childId]);
+  await runtime.dispose();
 });

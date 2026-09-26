@@ -22,6 +22,11 @@ export interface Disposable {
   dispose(): void;
 }
 
+export interface ContinuationCompileContext {
+  /** Complete approved history before the newly appended user task. */
+  history: PreparedConversation;
+}
+
 export interface PrepareRequest {
   backendId: string;
   intent: ExecutionIntent;
@@ -37,6 +42,7 @@ export interface PrepareRequest {
   compile(
     runtime: PromptRuntime,
     preflight: BackendPreflightAccepted,
+    continuation?: ContinuationCompileContext,
   ): Promise<PreparedConversation>;
 }
 
@@ -61,6 +67,8 @@ export interface RunHandle {
 
 export interface ExecutionRuntime {
   prepare(request: PrepareRequest): Promise<PreparedRun>;
+  /** Release a retained continuation handle in any registered backend. */
+  releaseContinuation(id: string): Promise<void>;
   execute(prepared: PreparedRun): RunHandle;
   registerBackend(backend: ExecutionBackend): Disposable;
   listBackends(): BackendDescriptor[];
@@ -78,7 +86,10 @@ export interface AcceptedPreparationInput {
 }
 
 export interface BackendPreparationContext {
-  compile(runtime: PromptRuntime): Promise<PreparedConversation>;
+  compile(
+    runtime: PromptRuntime,
+    continuation?: ContinuationCompileContext,
+  ): Promise<PreparedConversation>;
   signal: AbortSignal;
 }
 
@@ -106,6 +117,7 @@ export interface BackendExecutionContext {
 
 interface BackendResultCommon {
   enforcement: EnforcementReceipt;
+  continuationId?: string;
   usage?: RunUsage;
   workspaceChanges?: readonly WorkspaceChangeSet[];
 }
@@ -191,6 +203,12 @@ export interface ExecutionBackend {
    * bounded adapter-specific cleanup.
    */
   discard(preparation: BackendPreparation): Promise<void> | void;
+  /** Roll back an accepted preflight reservation if preparation never returns. */
+  releasePreflightReservation?(preflightId: string): Promise<void> | void;
+  /** Optional lifecycle hook for runtime-instance-local retained sessions. */
+  releaseContinuation?(id: string): Promise<void> | void;
+  /** Optional backend-wide cleanup, including retained in-memory sessions. */
+  dispose?(): Promise<void> | void;
 }
 
 export interface ExecutionRuntimeOptions {

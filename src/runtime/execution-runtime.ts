@@ -102,6 +102,8 @@ class ExecutionRuntimeImpl implements ExecutionRuntime {
   readonly #runs = new Set<RunRecord>();
   readonly #preparing = new Set<PreparationOperation>();
   readonly #acceptedPreflightKeys = new Set<string>();
+  /** Runtime ownership for continuation handles returned by a backend. */
+  readonly #continuationOwners = new Map<string, ExecutionBackend>();
   readonly #issuedIds = new Set<string>();
   readonly #idFactory: (kind: "prepared" | "run") => string;
   readonly #now: () => number;
@@ -210,10 +212,20 @@ class ExecutionRuntimeImpl implements ExecutionRuntime {
         intentDiagnostics,
       );
     }
+    if (
+      intent.continuation !== undefined &&
+      entry.descriptor.capabilities.continuation !== true
+    ) {
+      throw runtimeError(
+        "preflight.continuation-unsupported",
+        `Backend ${entry.descriptor.id} does not support in-memory continuation.`,
+      );
+    }
 
     const operation = createPreparationOperation(request.signal);
     this.#preparing.add(operation);
     let returnedPreparation: BackendPreparation | undefined;
+    let acceptedPreflightId: string | undefined;
     try {
       if (operation.controller.signal.aborted) {
         throw runtimeError(
@@ -245,6 +257,13 @@ class ExecutionRuntimeImpl implements ExecutionRuntime {
           "Preflight was cancelled.",
         );
       }
+      if (
+        preflightValue &&
+        typeof preflightValue === "object" &&
+        typeof (preflightValue as { preflightId?: unknown }).preflightId === "string"
+      ) {
+        acceptedPreflightId = (preflightValue as { preflightId: string }).preflightId;
+      }
       const preflight = cloneCanonical(
         preflightValue,
         "preflight.canonical",
@@ -270,6 +289,7 @@ class ExecutionRuntimeImpl implements ExecutionRuntime {
         );
       }
       const preflightKey = `${entry.descriptor.id}\0${preflight.preflightId}`;
+      acceptedPreflightId = preflight.preflightId;
       if (this.#acceptedPreflightKeys.has(preflightKey)) {
         throw runtimeError(
           "preflight.duplicate-id",
@@ -293,6 +313,7 @@ class ExecutionRuntimeImpl implements ExecutionRuntime {
       let compilerInvoked = false;
       const compile = async (
         candidateRuntime: PromptRuntime,
+        continuation?: import("./contracts.ts").ContinuationCompileContext,
       ): Promise<PreparedConversation> => {
         if (compilerInvoked) {
           throw runtimeError(
@@ -356,6 +377,7 @@ class ExecutionRuntimeImpl implements ExecutionRuntime {
           compilerOutput = await request.compile(
             structuredClone(runtime),
             structuredClone(preflight),
+            continuation ? structuredClone(continuation) : undefined,
           );
         } catch (cause) {
           throw runtimeError(
@@ -525,6 +547,21 @@ class ExecutionRuntimeImpl implements ExecutionRuntime {
         } finally {
           returnedPreparation = undefined;
         }
+      } else if (acceptedPreflightId) {
+        // Some backends reserve bounded retained capacity at accepted
+        // preflight, before preparation can start. Roll that reservation back
+        // when runtime cancellation/validation prevents prepare() from being
+        // called or returned.
+        try {
+          await entry.backend.releasePreflightReservation?.(acceptedPreflightId);
+        } catch (cleanupCause) {
+          throw runtimeError(
+            "preparation.cleanup-error",
+            `Backend reservation cleanup failed after preparation error: ${errorMessage(cleanupCause)}`,
+            [],
+            new AggregateError([cause, cleanupCause]),
+          );
+        }
       }
       throw cause;
     } finally {
@@ -625,9 +662,41 @@ class ExecutionRuntimeImpl implements ExecutionRuntime {
     return handle;
   }
 
+  async releaseContinuation(id: string): Promise<void> {
+    this.#assertOpen();
+    if (typeof id !== "string" || !OPAQUE_ID_PATTERN.test(id)) {
+      throw runtimeError(
+        "continuation.id-invalid",
+        "Continuation id must be an opaque runtime-local identifier.",
+      );
+    }
+    const owner = this.#continuationOwners.get(id);
+    if (owner?.releaseContinuation) {
+      await owner.releaseContinuation(id);
+      this.#continuationOwners.delete(id);
+      return;
+    }
+    let found = false;
+    // Handles are backend-local. Until a result has been observed, ask every
+    // continuation-capable backend rather than returning after the first
+    // backend that simply does not recognize this id.
+    for (const { backend } of this.#backends.values()) {
+      if (!backend.releaseContinuation) continue;
+      found = true;
+      await backend.releaseContinuation(id);
+    }
+    if (!found) {
+      throw runtimeError(
+        "continuation.unsupported",
+        "No registered backend exposes continuation release.",
+      );
+    }
+  }
+
   dispose(): Promise<void> {
     if (this.#disposePromise) return this.#disposePromise;
     this.#disposed = true;
+    const registeredBackends = [...this.#backends.values()].map(({ backend }) => backend);
     this.#backends.clear();
     this.#disposePromise = (async () => {
       for (const operation of this.#preparing) {
@@ -659,6 +728,31 @@ class ExecutionRuntimeImpl implements ExecutionRuntime {
             outcome.status === "rejected",
         )
         .map(({ reason }) => reason);
+      const disposableBackends = registeredBackends.filter(
+        (backend) => typeof backend.dispose === "function",
+      );
+      const backendOutcomes = await Promise.allSettled(
+        disposableBackends.map((backend) => Promise.resolve(backend.dispose!())),
+      );
+      // Keep ownership entries for backends whose cleanup failed. Although a
+      // disposed runtime cannot accept new work, this preserves the owner
+      // reference for diagnostics/retry paths and avoids claiming release
+      // succeeded before the backend did.
+      backendOutcomes.forEach((outcome, index) => {
+        if (outcome.status !== "fulfilled") return;
+        const backend = disposableBackends[index];
+        for (const [id, owner] of this.#continuationOwners) {
+          if (owner === backend) this.#continuationOwners.delete(id);
+        }
+      });
+      failures.push(
+        ...backendOutcomes
+          .filter(
+            (outcome): outcome is PromiseRejectedResult =>
+              outcome.status === "rejected",
+          )
+          .map(({ reason }) => reason),
+      );
       if (failures.length > 0) {
         throw new AggregateError(
           failures,
@@ -706,6 +800,7 @@ class ExecutionRuntimeImpl implements ExecutionRuntime {
     const { prepared } = run;
     let candidate: RunResult | undefined;
     let backendResult: BackendResult | undefined;
+    let invalidBackendResult = false;
     let cleanupError: unknown;
     let preparationDiscardInvoked = false;
     let preparationDiscardError: unknown;
@@ -752,6 +847,12 @@ class ExecutionRuntimeImpl implements ExecutionRuntime {
 
         try {
           backendResult = await execution.result;
+          if (typeof backendResult?.continuationId === "string") {
+            this.#continuationOwners.set(
+              backendResult.continuationId,
+              prepared.entry.backend,
+            );
+          }
         } catch (cause) {
           if (!run.cancellation) {
             throw runtimeError(
@@ -767,7 +868,16 @@ class ExecutionRuntimeImpl implements ExecutionRuntime {
         candidate = run.cancellation
           ? this.#cancellationResult(run, backendResult)
           : backendResult
-            ? this.#normalizeBackendResult(run, backendResult)
+            ? (() => {
+                const normalized = this.#validatedBackendResult(run, backendResult!);
+                if (normalized.result) return normalized.result;
+                invalidBackendResult = true;
+                return this.#failureResult(
+                  run,
+                  "execution.invalid-result",
+                  normalized.errorMessage ?? "Backend returned an invalid terminal result.",
+                );
+              })()
             : this.#failureResult(
                 run,
                 "execution.internal",
@@ -811,6 +921,16 @@ class ExecutionRuntimeImpl implements ExecutionRuntime {
     }
 
     cleanupError ??= preparationDiscardError;
+    if (run.cancellation || invalidBackendResult || cleanupError) {
+      const continuationId = backendResult?.continuationId;
+      if (typeof continuationId === "string") {
+        try {
+          await this.#releaseOwnedContinuation(continuationId, prepared.entry.backend);
+        } catch (cause) {
+          cleanupError ??= cause;
+        }
+      }
+    }
     if (cleanupError) {
       const cleanupFailure = this.#failureResult(
         run,
@@ -829,6 +949,24 @@ class ExecutionRuntimeImpl implements ExecutionRuntime {
       "execution.internal",
       "Execution reached cleanup without a terminal result.",
     ));
+  }
+
+  async #releaseOwnedContinuation(
+    id: string,
+    fallbackBackend: ExecutionBackend,
+  ): Promise<void> {
+    const owner = this.#continuationOwners.get(id);
+    const backend = owner ?? fallbackBackend;
+    if (!backend.releaseContinuation) {
+      if (this.#continuationOwners.get(id) === backend) {
+        this.#continuationOwners.delete(id);
+      }
+      return;
+    }
+    await backend.releaseContinuation(id);
+    if (this.#continuationOwners.get(id) === backend) {
+      this.#continuationOwners.delete(id);
+    }
   }
 
   #normalizeBackendResult(
