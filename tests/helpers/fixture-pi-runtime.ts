@@ -1,4 +1,4 @@
-import type { Context, Model, SimpleStreamOptions } from "@earendil-works/pi-ai";
+import type { TranscriptContext, Model, SimpleStreamOptions } from "@earendil-works/pi-ai";
 import { createFauxCore, InMemoryCredentialStore } from "@earendil-works/pi-ai";
 import { ModelRegistry, ModelRuntime } from "@earendil-works/pi-coding-agent";
 
@@ -37,7 +37,7 @@ export async function createFixturePiRuntime(options: FixturePiRuntimeOptions): 
 		apiKey: "fixture-key",
 		streamSimple: (
 			model: Model<any>,
-			context: Context,
+			context: TranscriptContext,
 			streamOptions?: SimpleStreamOptions,
 		) => faux.streamSimple(model, context, streamOptions),
 		models: [

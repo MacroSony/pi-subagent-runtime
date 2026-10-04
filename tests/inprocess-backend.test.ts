@@ -1,3 +1,4 @@
+import { getCurrentSystemPrompt } from "@earendil-works/pi-ai";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { AgentSession } from "@earendil-works/pi-coding-agent";
@@ -62,8 +63,8 @@ test("in-process backend resumes the primed session against an extension-registe
     (context) => {
       // Context carries tool execute functions and is not structuredClone-able.
       providerContexts.push({
-        ...(typeof context.systemPrompt === "string"
-          ? { systemPrompt: context.systemPrompt }
+        ...(typeof getCurrentSystemPrompt(context.messages) === "string"
+          ? { systemPrompt: getCurrentSystemPrompt(context.messages) }
           : {}),
         messageCount: context.messages?.length ?? 0,
       });
@@ -243,19 +244,19 @@ test("in-process continuation reuses the same session, reauthorizes full history
   });
   faux.setResponses([
     (context) => {
-      providerContexts.push({ system: context.systemPrompt ?? "", messages: structuredClone(context.messages ?? []) });
+      providerContexts.push({ system: getCurrentSystemPrompt(context.messages) ?? "", messages: structuredClone(context.messages ?? []) });
       return fauxAssistantMessage(fauxToolCall("read", { path: "package.json" }));
     },
     (context) => {
-      providerContexts.push({ system: context.systemPrompt ?? "", messages: structuredClone(context.messages ?? []) });
+      providerContexts.push({ system: getCurrentSystemPrompt(context.messages) ?? "", messages: structuredClone(context.messages ?? []) });
       return fauxAssistantMessage("First answer with SECRET_MARKER and tool history.");
     },
     (context) => {
-      providerContexts.push({ system: context.systemPrompt ?? "", messages: structuredClone(context.messages ?? []) });
+      providerContexts.push({ system: getCurrentSystemPrompt(context.messages) ?? "", messages: structuredClone(context.messages ?? []) });
       return fauxAssistantMessage("Second answer.");
     },
     (context) => {
-      providerContexts.push({ system: context.systemPrompt ?? "", messages: structuredClone(context.messages ?? []) });
+      providerContexts.push({ system: getCurrentSystemPrompt(context.messages) ?? "", messages: structuredClone(context.messages ?? []) });
       return fauxAssistantMessage("After discard.");
     },
   ]);
