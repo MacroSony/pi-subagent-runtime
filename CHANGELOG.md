@@ -4,6 +4,33 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+## [0.1.0-beta.5] - 2026-10-03
+
+### Fixed
+
+- In-process cleanup failures keep the validated usage receipt of provider
+  requests that already happened (previously dropped); no receipt is invented
+  when none exists.
+- A later `ExecutionRuntime.dispose()` call retries backend cleanups that failed
+  during the first disposal (one pass per call, never in the background) and
+  keeps continuation owners until their backend actually released them.
+- Bubblewrap mounts its private `/tmp`, `/proc` and `/dev` before runtime
+  binds, so a Node/Pi runtime, command, run directory or workspace under `/tmp`
+  is no longer hidden. Sandbox system directories are rejected as runtime
+  paths; the host `/tmp` is never mounted.
+
+### Changed
+
+- Development SDK pinned to Pi 1.0.2; tests use `TranscriptContext`. The full
+  suite (with real Bubblewrap required on Linux) is verified on Pi 0.87.0 and
+  1.0.x. Peer ranges are unchanged.
+- Release gates can set `PI_SUBAGENT_RUNTIME_REQUIRE_BWRAP=1` so a missing
+  `bwrap` fails instead of skipping. Adds GitHub Actions CI (Linux with real
+  Bubblewrap on dev/0.87.0/1.0.0 hosts, macOS, Windows).
+
+### Added (since beta.4, previously unreleased)
+
+
 - Add opt-in, bounded, same-process in-memory continuation on the in-process
   backend only. Fresh preflight/approval seals the full original context plus
   one new task; original SDK session/tool history is retained without summaries.

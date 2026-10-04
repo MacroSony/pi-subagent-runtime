@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  linux:
+    name: Linux (Pi ${{ matrix.pi-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        pi-version: ["dev", "0.87.0", "1.0.0"]
+    env:
+      # Bubblewrap tests must run on Linux; a missing bwrap is a failure here.
+      PI_SUBAGENT_RUNTIME_REQUIRE_BWRAP: "1"
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22.19.0
+          cache: npm
+      - name: Install Bubblewrap and allow unprivileged user namespaces
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          bwrap --version
+      - run: npm ci
+      - name: Install tested Pi host family
+        if: matrix.pi-version != 'dev'
+        run: >-
+          npm install --no-save --package-lock=false
+          @earendil-works/pi-agent-core@${{ matrix.pi-version }}
+          @earendil-works/pi-ai@${{ matrix.pi-version }}
+          @earendil-works/pi-coding-agent@${{ matrix.pi-version }}
+      - run: npm run verify
+
+  platform:
+    name: Verify (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22.19.0
+          cache: npm
+      - run: npm ci
+      - run: npm run verify

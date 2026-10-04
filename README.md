@@ -4,6 +4,8 @@
 
 **Status:** Experimental prerelease. The API may change before v0.1.0.
 
+**Tested hosts:** Pi 0.87.0 and Pi 1.0.x (development SDK 1.0.2), Node.js 22.19+. Pi SDK peers stay unrestricted (`*`); other host versions are not verified. The Bubblewrap backends require Linux with `bwrap`.
+
 Pi Subagent Runtime lets another extension or application execute an exact,
 caller-compiled Pi conversation through an explicitly selected backend.
 
