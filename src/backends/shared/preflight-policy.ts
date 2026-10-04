@@ -16,6 +16,7 @@ import {
 import type { PiModelRegistry } from "./pi-model-runtime.ts";
 
 export const VALID_PI_THINKING_LEVELS = new Set([
+  "off",
   "minimal",
   "low",
   "medium",

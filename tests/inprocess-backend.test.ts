@@ -52,7 +52,8 @@ function fixtureConversation(): PreparedConversation {
   };
 }
 
-test("in-process backend resumes the primed session against an extension-registered provider", async () => {
+for (const thinkingLevel of ["high", "off"]) {
+test(`in-process backend resumes an extension-registered provider with thinking ${thinkingLevel}`, async () => {
   const providerContexts: Array<{ systemPrompt?: string; messageCount: number }> = [];
   const { faux, modelRegistry } = await createFixturePiRuntime({
     provider: PROVIDER,
@@ -83,7 +84,7 @@ test("in-process backend resumes the primed session against an extension-registe
     let compiledRuntime: PromptRuntime | undefined;
     const prepared = await runtime.prepare({
       backendId: PI_INPROCESS_BACKEND_ID,
-      intent: fixtureIntent(),
+      intent: fixtureIntent({ thinkingLevel }),
       compile: async (promptRuntime) => {
         compiledRuntime = promptRuntime;
         return fixtureConversation();
@@ -97,6 +98,7 @@ test("in-process backend resumes the primed session against an extension-registe
 
     const plan = prepared.snapshot();
     assert.equal(plan.backendId, PI_INPROCESS_BACKEND_ID);
+    assert.equal(plan.preflight.thinkingLevel, thinkingLevel);
     assert.equal(plan.preflight.access.level, "workspace-write");
     assert.equal(plan.preflight.access.executionBoundary, "shared-user");
     assert.equal(plan.preflight.access.process, true);
@@ -154,6 +156,7 @@ test("in-process backend resumes the primed session against an extension-registe
     modelRegistry.unregisterProvider(PROVIDER);
   }
 });
+}
 
 test("in-process multi-turn runs keep the sealed conversation and never leak the preparation trigger", async () => {
   const observedContexts: Array<{ userTexts: string[]; hasToolResult: boolean }> = [];

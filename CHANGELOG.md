@@ -8,6 +8,9 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Accept Pi's supported `thinkingLevel: off` in built-in backend preflight
+  instead of rejecting non-thinking profiles before any provider request.
+
 - In-process cleanup failures keep the validated usage receipt of provider
   requests that already happened (previously dropped); no receipt is invented
   when none exists.
