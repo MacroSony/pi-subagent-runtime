@@ -79,13 +79,9 @@ export function bubblewrapArguments(
     args.push("--ro-bind", canonicalSource, canonicalDestination);
   };
 
-  // Dynamic executables need glibc, core command-line tools, certificates,
-  // and DNS configuration. These are runtime dependencies, not host project
-  // mounts. No broad root filesystem bind is used.
-  for (const path of defaultRuntimeReadOnlyPaths()) roBind(path);
-  for (const path of options.runtimeReadOnlyPaths) roBind(path);
-  roBind(invocationCommand);
-
+  // Private scratch filesystems come first. Bubblewrap applies operations in
+  // order, so a tmpfs mounted after a bind would hide every runtime path,
+  // command, run directory or workspace that lives under /tmp.
   ensureDirectory("/tmp");
   args.push("--tmpfs", "/tmp");
   ensureDirectory("/tmp/home");
@@ -93,6 +89,20 @@ export function bubblewrapArguments(
   args.push("--proc", "/proc");
   ensureDirectory("/dev");
   args.push("--dev", "/dev");
+
+  // Dynamic executables need glibc, core command-line tools, certificates,
+  // and DNS configuration. These are runtime dependencies, not host project
+  // mounts. No broad root filesystem bind is used. Paths under /tmp are bound
+  // individually on top of the private tmpfs; the host /tmp itself is never
+  // mounted.
+  for (const path of defaultRuntimeReadOnlyPaths()) roBind(path);
+  for (const path of options.runtimeReadOnlyPaths) {
+    if (RESERVED_SANDBOX_PATHS.has(normalize(path))) {
+      throw new Error(`Bubblewrap runtime path cannot be a sandbox system directory: ${path}`);
+    }
+    roBind(path);
+  }
+  roBind(invocationCommand);
 
   // This bind intentionally follows the immutable runtime mounts: it is the
   // only read-write project view supplied to the Pi child and its bash tools.
@@ -127,6 +137,8 @@ export function bubblewrapArguments(
  * installations. Hosts can add a narrower or additional runtime layout
  * through `runtimeReadOnlyPaths`; all paths are explicit and read-only.
  */
+const RESERVED_SANDBOX_PATHS = new Set(["/tmp", "/tmp/home", "/proc", "/dev"]);
+
 export function defaultRuntimeReadOnlyPaths(): readonly string[] {
   return ["/usr", "/lib", "/lib64", "/etc/ssl", "/etc/resolv.conf"];
 }
