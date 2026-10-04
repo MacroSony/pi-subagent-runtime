@@ -50,6 +50,11 @@ An enforcement receipt is a backend attestation. The runtime validates
 consistency, but callers remain responsible for trusting backend
 implementations.
 
+Backend cleanup failures can be retried by explicitly calling `dispose()` again
+(one pass per call, no background retry). Failed per-run/discard cleanup remains
+an error: a successful backend retry does not certify its recovery. Hosts must
+surface final cleanup errors rather than promise unconditional release.
+
 ## What it does not provide
 
 - a `subagent` tool or Pi command;
@@ -67,7 +72,7 @@ Hosts and separately versioned backends may provide those features.
 Install the current prerelease by its exact version in production integrations:
 
 ```sh
-npm install @zihanw/pi-subagent-runtime@0.1.0-beta.2
+npm install @zihanw/pi-subagent-runtime@0.1.0-beta.5
 ```
 
 The portable `core`, `runtime`, and `testing` entry points contain no Pi SDK

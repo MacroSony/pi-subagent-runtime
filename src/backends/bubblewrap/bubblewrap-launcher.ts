@@ -1,5 +1,5 @@
-import { existsSync } from "node:fs";
-import { dirname, isAbsolute, normalize, sep } from "node:path";
+import { existsSync, realpathSync } from "node:fs";
+import { dirname, isAbsolute, resolve, sep } from "node:path";
 
 export interface BubblewrapInvocation {
   command: string;
@@ -97,7 +97,9 @@ export function bubblewrapArguments(
   // mounted.
   for (const path of defaultRuntimeReadOnlyPaths()) roBind(path);
   for (const path of options.runtimeReadOnlyPaths) {
-    if (RESERVED_SANDBOX_PATHS.has(normalize(path))) {
+    const source = absolutePath(path, "runtime path");
+    if (RESERVED_SANDBOX_PATHS.has(source) ||
+        (existsSync(source) && RESERVED_SANDBOX_PATHS.has(realpathSync(source)))) {
       throw new Error(`Bubblewrap runtime path cannot be a sandbox system directory: ${path}`);
     }
     roBind(path);
@@ -137,7 +139,7 @@ export function bubblewrapArguments(
  * installations. Hosts can add a narrower or additional runtime layout
  * through `runtimeReadOnlyPaths`; all paths are explicit and read-only.
  */
-const RESERVED_SANDBOX_PATHS = new Set(["/tmp", "/tmp/home", "/proc", "/dev"]);
+const RESERVED_SANDBOX_PATHS = new Set(["/", "/tmp", "/tmp/home", "/proc", "/dev"]);
 
 export function defaultRuntimeReadOnlyPaths(): readonly string[] {
   return ["/usr", "/lib", "/lib64", "/etc/ssl", "/etc/resolv.conf"];
@@ -147,7 +149,7 @@ function absolutePath(path: string, label: string): string {
   if (!isAbsolute(path)) {
     throw new Error(`Bubblewrap ${label} must be absolute: ${path}`);
   }
-  const normalized = normalize(path);
+  const normalized = resolve(path);
   if (normalized === sep || !normalized.startsWith(sep)) {
     throw new Error(`Bubblewrap ${label} is unsafe: ${path}`);
   }

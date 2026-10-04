@@ -13,11 +13,13 @@ All notable changes to this project will be documented in this file.
   when none exists.
 - A later `ExecutionRuntime.dispose()` call retries backend cleanups that failed
   during the first disposal (one pass per call, never in the background) and
-  keeps continuation owners until their backend actually released them.
+  keeps continuation owners until their backend actually released them. Synchronous
+  backend throws cannot suppress sibling cleanup; failed per-run/discard cleanup
+  remains an error (backend retry alone is not proof of recovery).
 - Bubblewrap mounts its private `/tmp`, `/proc` and `/dev` before runtime
   binds, so a Node/Pi runtime, command, run directory or workspace under `/tmp`
   is no longer hidden. Sandbox system directories are rejected as runtime
-  paths; the host `/tmp` is never mounted.
+  paths, including trailing-slash and symlink aliases; the host `/tmp` is never mounted.
 
 ### Changed
 

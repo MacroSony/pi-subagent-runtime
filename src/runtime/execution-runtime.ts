@@ -112,6 +112,9 @@ class ExecutionRuntimeImpl implements ExecutionRuntime {
   #disposeFailed = false;
   #disposeRetry: Promise<void> | undefined;
   #failedDisposalBackends: ExecutionBackend[] = [];
+  // A backend-level retry cannot certify recovery of failed per-run/discard
+  // cleanup. Keep these diagnostics terminal rather than silently clearing them.
+  #disposalLifecycleFailures: unknown[] = [];
 
   constructor(options: ExecutionRuntimeOptions) {
     this.#idFactory =
@@ -736,11 +739,12 @@ class ExecutionRuntimeImpl implements ExecutionRuntime {
             outcome.status === "rejected",
         )
         .map(({ reason }) => reason);
+      this.#disposalLifecycleFailures = failures.slice();
       const disposableBackends = registeredBackends.filter(
         (backend) => typeof backend.dispose === "function",
       );
       const backendOutcomes = await Promise.allSettled(
-        disposableBackends.map((backend) => Promise.resolve(backend.dispose!())),
+        disposableBackends.map((backend) => Promise.resolve().then(() => backend.dispose!())),
       );
       // Keep ownership entries for backends whose cleanup failed. Although a
       // disposed runtime cannot accept new work, this preserves the owner
@@ -777,7 +781,7 @@ class ExecutionRuntimeImpl implements ExecutionRuntime {
     const backends = this.#failedDisposalBackends;
     this.#disposeRetry = (async () => {
       const outcomes = await Promise.allSettled(
-        backends.map((backend) => Promise.resolve(backend.dispose!())),
+        backends.map((backend) => Promise.resolve().then(() => backend.dispose!())),
       );
       outcomes.forEach((outcome, index) => {
         if (outcome.status === "fulfilled") this.#forgetContinuationOwner(backends[index]!);
@@ -785,12 +789,15 @@ class ExecutionRuntimeImpl implements ExecutionRuntime {
       this.#failedDisposalBackends = backends.filter(
         (_, index) => outcomes[index]!.status === "rejected",
       );
-      const failures = outcomes
-        .filter(
-          (outcome): outcome is PromiseRejectedResult =>
-            outcome.status === "rejected",
-        )
-        .map(({ reason }) => reason);
+      const failures = [
+        ...this.#disposalLifecycleFailures,
+        ...outcomes
+          .filter(
+            (outcome): outcome is PromiseRejectedResult =>
+              outcome.status === "rejected",
+          )
+          .map(({ reason }) => reason),
+      ];
       if (failures.length > 0) {
         throw new AggregateError(
           failures,

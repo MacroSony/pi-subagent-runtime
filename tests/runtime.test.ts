@@ -863,3 +863,39 @@ test("host cancellation releases a child retained by a racing backend completion
   assert.deepEqual(released, [childId]);
   await runtime.dispose();
 });
+
+test("runtime disposal captures synchronous throws, visits all backends and shares retry", async () => {
+  const runtime = deterministicRuntime();
+  const first = new DeterministicFakeBackend({ id: "sync-failure" });
+  const second = new DeterministicFakeBackend({ id: "healthy" });
+  let firstCalls = 0;
+  let secondCalls = 0;
+  Object.assign(first, { dispose() {
+    if (++firstCalls === 1) throw new Error("synchronous cleanup failure");
+  } });
+  Object.assign(second, { dispose() { secondCalls++; } });
+  runtime.registerBackend(first);
+  runtime.registerBackend(second);
+  await assert.rejects(runtime.dispose(), /Runtime disposal encountered cleanup failures/);
+  assert.equal(firstCalls, 1);
+  assert.equal(secondCalls, 1, "a synchronous throw must not suppress other cleanup owners");
+  const retry = runtime.dispose();
+  assert.equal(runtime.dispose(), retry, "concurrent callers share the same retry pass");
+  await retry;
+  await runtime.dispose();
+  assert.equal(firstCalls, 2);
+  assert.equal(secondCalls, 1, "successful backends are not disposed twice");
+});
+
+test("backend retry must not erase an unrecoverable preparation discard failure", async () => {
+  const runtime = deterministicRuntime();
+  const backend = new DeterministicFakeBackend();
+  backend.discard = async () => { throw new Error("failed preparation discard"); };
+  let disposalCalls = 0;
+  Object.assign(backend, { dispose() { disposalCalls++; } });
+  runtime.registerBackend(backend);
+  await runtime.prepare(request(backend));
+  await assert.rejects(runtime.dispose(), /Runtime disposal encountered cleanup failures/);
+  await assert.rejects(runtime.dispose(), /Runtime disposal retry encountered cleanup failures/);
+  assert.equal(disposalCalls, 1, "backend success cannot certify a failed discard was recovered");
+});

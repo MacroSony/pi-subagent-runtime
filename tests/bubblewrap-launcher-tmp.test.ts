@@ -25,7 +25,7 @@ test("release gates can require real Bubblewrap instead of skipping", () => {
   assert.ok(BWRAP_PATH, "PI_SUBAGENT_RUNTIME_REQUIRE_BWRAP=1 but bwrap was not found");
 });
 
-test("the private /tmp is mounted before runtime binds", () => {
+test("the private /tmp is mounted before runtime binds", { skip: process.platform !== "linux" }, () => {
   const root = mkdtempSync(join(tmpdir(), "pi-subagent-runtime-bwrap-order-"));
   try {
     for (const dir of ["runtime", "ws", "run"]) mkdirSync(join(root, dir));
@@ -42,6 +42,9 @@ test("the private /tmp is mounted before runtime binds", () => {
     assert.ok(tmpfs >= 0);
     const firstBind = args.findIndex((arg) => arg === "--ro-bind" || arg === "--bind");
     assert.ok(firstBind > tmpfs, "every bind must come after the /tmp tmpfs");
+    const alias = join(root, "tmp-alias");
+    if (process.platform !== "win32") symlinkSync("/tmp", alias);
+    for (const forbidden of ["/tmp", "/tmp/", "/tmp/home/", "/proc/", "/dev/", ...(process.platform !== "win32" ? [alias] : [])]) {
     assert.throws(
       () =>
         bubblewrapArguments({
@@ -49,11 +52,12 @@ test("the private /tmp is mounted before runtime binds", () => {
           workspaceSourcePath: join(root, "ws"),
           workspacePath: join(root, "ws"),
           runDirectory: join(root, "run"),
-          runtimeReadOnlyPaths: ["/tmp"],
+          runtimeReadOnlyPaths: [forbidden],
           env: {},
         }),
       /cannot be a sandbox system directory/,
     );
+    }
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
