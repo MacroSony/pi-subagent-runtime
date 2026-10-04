@@ -609,6 +609,10 @@ export class PiInProcessBackend implements ExecutionBackend {
     const message = error instanceof Error ? error.message : String(error);
     if (report) report.status = "failed";
     const output = report ? latestProcessAssistantText(report.messages) : undefined;
+    // Provider requests that already happened are billed regardless of how
+    // cleanup ends. Keep the validated receipt; never synthesize one when the
+    // report has none.
+    const usage = report ? processRunUsage(report.usage) : undefined;
     return {
       status: "failed",
       error: { code: "inprocess-cleanup", message, retryable: false },
@@ -616,6 +620,7 @@ export class PiInProcessBackend implements ExecutionBackend {
         access: structuredClone(plan.preflight.access),
         limits: structuredClone(plan.preflight.limits),
       },
+      ...(usage ? { usage } : {}),
       ...(output ? { output: { text: output, partial: true } } : {}),
     };
   }

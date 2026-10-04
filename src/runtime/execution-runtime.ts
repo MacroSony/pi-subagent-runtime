@@ -109,6 +109,9 @@ class ExecutionRuntimeImpl implements ExecutionRuntime {
   readonly #now: () => number;
   #disposed = false;
   #disposePromise?: Promise<void>;
+  #disposeFailed = false;
+  #disposeRetry: Promise<void> | undefined;
+  #failedDisposalBackends: ExecutionBackend[] = [];
 
   constructor(options: ExecutionRuntimeOptions) {
     this.#idFactory =
@@ -694,7 +697,12 @@ class ExecutionRuntimeImpl implements ExecutionRuntime {
   }
 
   dispose(): Promise<void> {
-    if (this.#disposePromise) return this.#disposePromise;
+    // A failed disposal stays failed until a later explicit dispose() call
+    // retries the backend cleanups that failed. Each call makes at most one
+    // retry pass; nothing retries in the background.
+    if (this.#disposePromise) {
+      return this.#disposeFailed ? this.#retryFailedDisposal() : this.#disposePromise;
+    }
     this.#disposed = true;
     const registeredBackends = [...this.#backends.values()].map(({ backend }) => backend);
     this.#backends.clear();
@@ -736,15 +744,15 @@ class ExecutionRuntimeImpl implements ExecutionRuntime {
       );
       // Keep ownership entries for backends whose cleanup failed. Although a
       // disposed runtime cannot accept new work, this preserves the owner
-      // reference for diagnostics/retry paths and avoids claiming release
-      // succeeded before the backend did.
+      // reference for diagnostics and the next dispose() retry, and avoids
+      // claiming release succeeded before the backend did.
       backendOutcomes.forEach((outcome, index) => {
         if (outcome.status !== "fulfilled") return;
-        const backend = disposableBackends[index];
-        for (const [id, owner] of this.#continuationOwners) {
-          if (owner === backend) this.#continuationOwners.delete(id);
-        }
+        this.#forgetContinuationOwner(disposableBackends[index]!);
       });
+      this.#failedDisposalBackends = disposableBackends.filter(
+        (_, index) => backendOutcomes[index]!.status === "rejected",
+      );
       failures.push(
         ...backendOutcomes
           .filter(
@@ -754,6 +762,7 @@ class ExecutionRuntimeImpl implements ExecutionRuntime {
           .map(({ reason }) => reason),
       );
       if (failures.length > 0) {
+        this.#disposeFailed = true;
         throw new AggregateError(
           failures,
           "Runtime disposal encountered cleanup failures.",
@@ -761,6 +770,46 @@ class ExecutionRuntimeImpl implements ExecutionRuntime {
       }
     })();
     return this.#disposePromise;
+  }
+
+  #retryFailedDisposal(): Promise<void> {
+    if (this.#disposeRetry) return this.#disposeRetry;
+    const backends = this.#failedDisposalBackends;
+    this.#disposeRetry = (async () => {
+      const outcomes = await Promise.allSettled(
+        backends.map((backend) => Promise.resolve(backend.dispose!())),
+      );
+      outcomes.forEach((outcome, index) => {
+        if (outcome.status === "fulfilled") this.#forgetContinuationOwner(backends[index]!);
+      });
+      this.#failedDisposalBackends = backends.filter(
+        (_, index) => outcomes[index]!.status === "rejected",
+      );
+      const failures = outcomes
+        .filter(
+          (outcome): outcome is PromiseRejectedResult =>
+            outcome.status === "rejected",
+        )
+        .map(({ reason }) => reason);
+      if (failures.length > 0) {
+        throw new AggregateError(
+          failures,
+          "Runtime disposal retry encountered cleanup failures.",
+        );
+      }
+      // Every backend that failed before has now released its resources.
+      this.#disposeFailed = false;
+      this.#disposePromise = Promise.resolve();
+    })().finally(() => {
+      this.#disposeRetry = undefined;
+    });
+    return this.#disposeRetry;
+  }
+
+  #forgetContinuationOwner(backend: ExecutionBackend): void {
+    for (const [id, owner] of this.#continuationOwners) {
+      if (owner === backend) this.#continuationOwners.delete(id);
+    }
   }
 
   async #discardHandle(handle: PreparedRunHandle): Promise<void> {
