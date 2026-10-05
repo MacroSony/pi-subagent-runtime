@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { readFile, readdir } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { dirname, join, sep } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import {
@@ -685,7 +685,7 @@ test("portable core, runtime, and testing layers have no Pi SDK or Forge imports
     if (!name.endsWith(".ts")) continue;
     // Pi version coupling is confined to backend entry points; the portable
     // core, runtime, and testing layers must stay Pi-free.
-    if (name.startsWith("backends/")) continue;
+    if (name.startsWith(`backends${sep}`)) continue;
     const source = await readFile(join(SOURCE_DIRECTORY, name), "utf8");
     assert.doesNotMatch(source, /@earendil-works\/pi-/);
     assert.doesNotMatch(source, /pi-forge|agent-profile|prompt-stack/);

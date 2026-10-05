@@ -30,6 +30,7 @@ test("proposal workspace collector reports deterministic text, mode, deletion, a
     writeFileSync(join(root, "edited.txt"), "before\n", "utf8");
     writeFileSync(join(root, "deleted.txt"), "gone\n", "utf8");
     writeFileSync(join(root, "mode.txt"), "same\n", "utf8");
+    chmodSync(join(root, "mode.txt"), 0o644);
     symlinkSync("edited.txt", join(root, "link"));
     mkdirSync(join(proposal, "nested"));
     writeFileSync(join(proposal, "edited.txt"), "after\n", "utf8");
@@ -38,6 +39,16 @@ test("proposal workspace collector reports deterministic text, mode, deletion, a
     writeFileSync(join(proposal, "nested", "added.txt"), "added\n", "utf8");
     symlinkSync("nested/added.txt", join(proposal, "link"));
 
+    // Windows chmod cannot set POSIX executable bits. Verify that native
+    // behavior rather than expecting a mode-only change that never happened.
+    const sourceMode = lstatSync(join(root, "mode.txt")).mode & 0o7777;
+    const proposalMode = lstatSync(join(proposal, "mode.txt")).mode & 0o7777;
+    if (process.platform === "win32") {
+      assert.equal(proposalMode, sourceMode);
+    } else {
+      assert.equal(sourceMode, 0o644);
+      assert.equal(proposalMode, 0o755);
+    }
     const baseline = createWorkspaceManifest(root);
     const changes = collectWorkspaceChanges({
       sourceRoot: root,
@@ -50,7 +61,7 @@ test("proposal workspace collector reports deterministic text, mode, deletion, a
         ["deleted.txt", "deleted"],
         ["edited.txt", "modified"],
         ["link", "symlink-changed"],
-        ["mode.txt", "mode-changed"],
+        ...(process.platform === "win32" ? [] : [["mode.txt", "mode-changed"]]),
         ["nested", "added"],
         ["nested/added.txt", "added"],
       ],
@@ -115,7 +126,8 @@ test("proposal workspace apply checks the baseline then materializes files, dire
     assert.equal(readFileSync(join(root, "edited.txt"), "utf8"), "after\n");
     assert.equal(existsSync(join(root, "deleted.txt")), false);
     assert.equal(lstatSync(join(root, "file-to-directory")).isDirectory(), true);
-    assert.equal(readlinkSync(join(root, "link")), "file-to-directory/child.txt");
+    assert.equal(readlinkSync(join(root, "link")), readlinkSync(join(proposal, "link")));
+    assert.equal(readFileSync(join(root, "link"), "utf8"), "child\n");
   } finally {
     rmSync(root, { recursive: true, force: true });
     rmSync(proposal, { recursive: true, force: true });

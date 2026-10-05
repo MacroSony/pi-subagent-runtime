@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
+import { ChildProcess } from "node:child_process";
 import { readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
-import test from "node:test";
+import test, { type TestContext } from "node:test";
+import { setImmediate } from "node:timers/promises";
 import type { Context } from "@earendil-works/pi-ai";
 import { createFixturePiRuntime } from "./helpers/fixture-pi-runtime.ts";
 import type {
@@ -182,7 +184,7 @@ test("subprocess backend prepares through the parent model runtime, executes a f
   assert.deepEqual(subprocessTempDirectories(), tempDirectoriesBefore);
 });
 
-test("subprocess cancellation waits for the child to close and terminalizes its report", async () => {
+test("subprocess cancellation waits for the child to close and terminalizes its report", { timeout: 20_000 }, async (t) => {
   const tempDirectoriesBefore = subprocessTempDirectories();
   const { faux, modelRegistry } = await createFixturePiRuntime({
     provider: PROVIDER,
@@ -217,7 +219,6 @@ test("subprocess cancellation waits for the child to close and terminalizes its 
   };
   const script = [
     'const { writeSync } = await import("node:fs");',
-    'process.on("SIGTERM", () => setTimeout(() => process.exit(0), 60));',
     `writeSync(3, JSON.stringify(${JSON.stringify(startedEvent)}) + "\\n");`,
     "setInterval(() => undefined, 1_000);",
   ].join("\n");
@@ -232,6 +233,7 @@ test("subprocess cancellation waits for the child to close and terminalizes its 
   const runtime = createExecutionRuntime();
   runtime.registerBackend(backend);
 
+  const termination = holdChildTermination(t);
   try {
     const prepared = await runtime.prepare({
       backendId: PI_SUBPROCESS_READONLY_BACKEND_ID,
@@ -249,18 +251,34 @@ test("subprocess cancellation waits for the child to close and terminalizes its 
       }
     });
     await childStarted;
-    const cancelledAt = Date.now();
-    await run.cancel("fixture cancellation");
-    const result = await run.result;
+    let cancelSettled = false;
+    let resultSettled = false;
+    const resultPromise = run.result.then((result) => {
+      resultSettled = true;
+      assert.equal(termination.closed, true, "result must follow the real child close event");
+      return result;
+    });
+    const cancellation = run.cancel("fixture cancellation").then(() => {
+      cancelSettled = true;
+      assert.equal(termination.closed, true, "cancel must wait for the real child close event");
+    });
+    // Attach failure handlers immediately; the original promises are awaited below.
+    void resultPromise.catch(() => undefined);
+    void cancellation.catch(() => undefined);
+    await termination.requested;
+    await setImmediate(); // Flush premature promise completion, not a timing threshold.
+    assert.equal(termination.closed, false);
+    assert.equal(cancelSettled, false, "cancel cannot settle while termination is held");
+    assert.equal(resultSettled, false, "result cannot settle while the child is alive");
+    termination.release();
+    await cancellation;
+    const result = await resultPromise;
     assert.equal(result.status, "cancelled");
-    assert.ok(
-      Date.now() - cancelledAt >= 40,
-      "the result must wait for the child close event",
-    );
     const report = backend.takeReport(prepared.id);
     assert.equal(report?.status, "cancelled");
     assert.ok(report?.finishedAt);
   } finally {
+    termination.release();
     await runtime.dispose();
     await backend.dispose();
     modelRegistry.unregisterProvider(PROVIDER);
@@ -268,7 +286,7 @@ test("subprocess cancellation waits for the child to close and terminalizes its 
   assert.deepEqual(subprocessTempDirectories(), tempDirectoriesBefore);
 });
 
-test("subprocess backend disposal waits for active children instead of orphaning them", async () => {
+test("subprocess backend disposal waits for active children instead of orphaning them", { timeout: 20_000 }, async (t) => {
   const tempDirectoriesBefore = subprocessTempDirectories();
   const { faux, modelRegistry } = await createFixturePiRuntime({
     provider: PROVIDER,
@@ -284,7 +302,6 @@ test("subprocess backend disposal waits for active children instead of orphaning
   const startedEvent = fixtureEvents().at(-1);
   const script = [
     'const { writeSync } = await import("node:fs");',
-    'process.on("SIGTERM", () => setTimeout(() => process.exit(0), 60));',
     `writeSync(3, JSON.stringify(${JSON.stringify(startedEvent)}) + "\\n");`,
     "setInterval(() => undefined, 1_000);",
   ].join("\n");
@@ -299,6 +316,7 @@ test("subprocess backend disposal waits for active children instead of orphaning
   const runtime = createExecutionRuntime();
   runtime.registerBackend(backend);
 
+  const termination = holdChildTermination(t);
   try {
     const prepared = await runtime.prepare({
       backendId: PI_SUBPROCESS_READONLY_BACKEND_ID,
@@ -314,15 +332,30 @@ test("subprocess backend disposal waits for active children instead of orphaning
       if (event.phase === "message") notifyStarted();
     });
     await childStarted;
-    const disposedAt = Date.now();
-    await backend.dispose();
-    assert.ok(
-      Date.now() - disposedAt >= 40,
-      "dispose must wait for the child close event",
-    );
-    const result = await run.result;
+    let disposeSettled = false;
+    let resultSettled = false;
+    const resultPromise = run.result.then((result) => {
+      resultSettled = true;
+      assert.equal(termination.closed, true, "result must follow the real child close event");
+      return result;
+    });
+    const disposal = backend.dispose().then(() => {
+      disposeSettled = true;
+      assert.equal(termination.closed, true, "dispose must wait for the real child close event");
+    });
+    void resultPromise.catch(() => undefined);
+    void disposal.catch(() => undefined);
+    await termination.requested;
+    await setImmediate();
+    assert.equal(termination.closed, false);
+    assert.equal(disposeSettled, false, "dispose cannot settle while termination is held");
+    assert.equal(resultSettled, false, "result cannot settle while the child is alive");
+    termination.release();
+    await disposal;
+    const result = await resultPromise;
     assert.equal(result.status, "cancelled");
   } finally {
+    termination.release();
     await runtime.dispose();
     await backend.dispose();
     modelRegistry.unregisterProvider(PROVIDER);
@@ -698,4 +731,38 @@ function subprocessTempDirectories(): string[] {
         name.startsWith("pi-subagent-runtime-run-"),
     )
     .sort();
+}
+
+/** Hold the termination request, not a POSIX SIGTERM handler in the child.
+ * The child, OS termination and close event stay real on every platform.
+ * Tests in this file are serial; TestContext restores the prototype mock.
+ */
+function holdChildTermination(t: TestContext) {
+  const kill = ChildProcess.prototype.kill;
+  let child: ChildProcess | undefined;
+  let released = false;
+  let closed = false;
+  let notifyRequested!: () => void;
+  const requested = new Promise<void>((resolve) => { notifyRequested = resolve; });
+  const release = () => {
+    if (released) return;
+    released = true;
+    if (child && !closed) kill.call(child, "SIGTERM");
+  };
+  t.after(release);
+  t.mock.method(ChildProcess.prototype, "kill", function (
+    this: ChildProcess,
+    signal?: NodeJS.Signals | number,
+  ) {
+    if (signal !== "SIGTERM") return kill.call(this, signal);
+    if (!child) {
+      child = this;
+      this.once("close", () => { closed = true; });
+      notifyRequested();
+    } else {
+      assert.equal(this, child, "termination gate must only target the test child");
+    }
+    return released ? kill.call(this, signal) : true;
+  });
+  return { requested, release, get closed() { return closed; } };
 }
